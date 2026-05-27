@@ -3,7 +3,7 @@ pub mod db;
 
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
-pub use api::hn::fetch_top_stories;
+pub use api::hn::CrawlerState;
 
 const DEFAULT_DATABASE_URL: &str = "sqlite:wastest.db?mode=rwc";
 
