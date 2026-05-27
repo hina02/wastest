@@ -1,36 +1,36 @@
-use wasm_bindgen::prelude::*;
+pub mod api;
+pub mod db;
 
-#[wasm_bindgen]
-pub fn greet(name: &str) -> String {
-    format!("Hello, {}!", name)
+use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+
+pub use api::hn::fetch_top_stories;
+
+const DEFAULT_DATABASE_URL: &str = "sqlite:wastest.db?mode=rwc";
+
+pub async fn connect(database_url: Option<&str>) -> Result<SqlitePool, sqlx::Error> {
+    let url = database_url.unwrap_or(DEFAULT_DATABASE_URL);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(10)
+        .connect(url)
+        .await?;
+    init_schema(&pool).await?;
+    Ok(pool)
 }
 
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = console)]
-    fn log(s: &str);
-}
-
-#[wasm_bindgen]
-pub fn hello_wasm() {
-    log("Hello from Rust!");
-}
-
-
-// 数値
-#[wasm_bindgen]
-pub fn add(a: i32, b: i32) -> i32 {
-    a + b
-}
-
-// 文字列
-#[wasm_bindgen]
-pub fn reverse_string(s: &str) -> String {
-    s.chars().rev().collect()
-}
-
-// 配列（Uint8Array）
-#[wasm_bindgen]
-pub fn sum_array(arr: &[u8]) -> u32 {
-    arr.iter().map(|&x| x as u32).sum()
+async fn init_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS hn_items (
+            id INTEGER PRIMARY KEY,
+            item_type TEXT NOT NULL,
+            "by" TEXT NOT NULL,
+            time INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            url TEXT NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
