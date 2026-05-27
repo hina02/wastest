@@ -52,3 +52,81 @@ impl DuckDBClient {
         Ok(results)
     }
 }
+
+// s3 upload
+impl DuckDBClient {
+    pub fn setup_s3_environment(&self, access_key: &str, secret_key: &str) -> Result<()> {
+        self.conn.execute_batch("INSTALL sqlite; LOAD sqlite;")?;
+
+        let s3_query = format!(
+            "
+            INSTALL httpfs;
+            LOAD httpfs;
+            CREATE SECRET (
+                TYPE S3,
+                KEY_ID '{}',
+                SECRET '{}',
+                REGION 'ap-northeast-1'
+            );
+            ",
+            access_key, secret_key
+        );
+        self.conn.execute_batch(&s3_query)?;
+        Ok(())
+    }
+
+    /// Task 2 (Write): SQLite のデータを S3 へ Hive パーティション形式でエクスポート
+    pub fn export_to_s3_lake(&self, bucket_id: &str) -> Result<()> {
+        // DuckDBに動的にコピー文を作らせて実行する堅牢なアプローチ
+        let generate_sql = format!(
+            "SELECT format(
+                'COPY (SELECT * FROM sqlite_scan(''wastest.db'', ''hn_items'')) 
+                 TO ''s3://{}/archive/hn_items/year=%s/month=%s/day=%s/hn_items.parquet'' (FORMAT PARQUET, COMPRESSION ''ZSTD'');',
+                strftime(current_timestamp, '%Y'),
+                strftime(current_timestamp, '%m'),
+                strftime(current_timestamp, '%d')
+            );",
+            bucket_id
+        );
+
+        let export_sql: String = self.conn.query_row(&generate_sql, [], |row| row.get(0))?;
+        self.conn.execute_batch(&export_sql)?;
+        Ok(())
+    }
+
+    /// Task 2 (Read): S3 データレイク全体の全履歴から、各アイテムの最新状態を動的解決して取得
+    pub fn query_latest_from_s3_lake(
+        &self,
+        bucket_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(i64, String, i64, String)>> {
+        let read_sql = format!(
+            "
+            WITH ranked_items AS (
+                SELECT 
+                    id, 
+                    title, 
+                    time,
+                    year, month, day,
+                    ROW_NUMBER() OVER (PARTITION BY id ORDER BY time DESC) as rn
+                FROM 's3://{}/archive/hn_items/year=*/month=*/day=*/*.parquet'
+            )
+            SELECT id, title, time, (year || '-' || month || '-' || day) as archive_date
+            FROM ranked_items
+            WHERE rn = 1
+            ORDER BY time DESC
+            LIMIT {};
+            ",
+            bucket_id, limit
+        );
+
+        let mut stmt = self.conn.prepare(&read_sql)?;
+        let mut rows = stmt.query([])?;
+        let mut results = Vec::new();
+
+        while let Some(row) = rows.next()? {
+            results.push((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
+        }
+        Ok(results)
+    }
+}

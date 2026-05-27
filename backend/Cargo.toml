@@ -25,6 +25,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0.102"
 dotenvy = "0.15"
+chrono = "0.4.44"
 
 [profile.release]
 opt-level = "s" # サイズ最適化

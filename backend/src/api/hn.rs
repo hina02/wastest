@@ -20,13 +20,11 @@ pub struct CrawlerState {
 impl CrawlerState {
     pub async fn new(pool: SqlitePool, duck: DuckDBClient) -> Result<Self> {
         let client = reqwest::Client::new();
-        let mut bloom =
-            Bloom::new_for_fp_rate(10_000_000, 0.01).map_err(anyhow::Error::msg)?;
+        let mut bloom = Bloom::new_for_fp_rate(10_000_000, 0.01).map_err(anyhow::Error::msg)?;
 
         println!("SQLiteから既存のIDを読み込み、Bloom Filterを構築中...");
         {
-            let mut rows =
-                sqlx::query_scalar::<_, i64>("SELECT id FROM hn_items").fetch(&pool);
+            let mut rows = sqlx::query_scalar!("SELECT id FROM hn_items").fetch(&pool);
             while let Some(row) = rows.next().await {
                 let id = row?;
                 bloom.set(&id);

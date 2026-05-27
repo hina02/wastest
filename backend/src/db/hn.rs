@@ -1,4 +1,6 @@
-use sqlx::SqlitePool;
+use chrono::Utc;
+use sqlx::{Result, SqlitePool};
+
 pub struct CreateHNItem {
     pub id: i64,
     pub item_type: String,
@@ -9,11 +11,10 @@ pub struct CreateHNItem {
 }
 
 pub async fn exists(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM hn_items WHERE id = ?)")
-        .bind(id)
+    let result: i64 = sqlx::query_scalar!("SELECT EXISTS(SELECT 1 FROM hn_items WHERE id = ?)", id)
         .fetch_one(pool)
         .await?;
-    Ok(exists)
+    Ok(result == 1)
 }
 
 pub async fn create_many(pool: &SqlitePool, items: &[CreateHNItem]) -> Result<(), sqlx::Error> {
@@ -38,4 +39,16 @@ pub async fn create_many(pool: &SqlitePool, items: &[CreateHNItem]) -> Result<()
     });
     q.execute(pool).await?;
     Ok(())
+}
+
+pub async fn delete_old_items(pool: &SqlitePool) -> Result<u64> {
+    let now = Utc::now();
+    let seven_days_ago = now - chrono::Duration::days(7);
+    let threshold_time = seven_days_ago.timestamp();
+
+    let result = sqlx::query!("DELETE FROM hn_items WHERE time <= ?", threshold_time)
+        .execute(pool)
+        .await?;
+
+    Ok(result.rows_affected())
 }
