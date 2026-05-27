@@ -9,4 +9,5 @@ Cargo.lock
 .env
 
 # Local
-wastest.db
+wastest.db*
+*.duckdb

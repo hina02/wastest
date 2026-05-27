@@ -1,3 +1,4 @@
+use crate::db::duck::DuckDBClient;
 use crate::db::hn::{CreateHNItem, create_many, exists};
 use anyhow::Result;
 use bloomfilter::Bloom;
@@ -13,10 +14,11 @@ pub struct CrawlerState {
     pub pool: SqlitePool,
     pub client: reqwest::Client,
     pub bloom: Bloom<i64>,
+    pub duck: DuckDBClient,
 }
 
 impl CrawlerState {
-    pub async fn new(pool: SqlitePool) -> Result<Self> {
+    pub async fn new(pool: SqlitePool, duck: DuckDBClient) -> Result<Self> {
         let client = reqwest::Client::new();
         let mut bloom =
             Bloom::new_for_fp_rate(10_000_000, 0.01).map_err(anyhow::Error::msg)?;
@@ -35,6 +37,7 @@ impl CrawlerState {
             pool,
             client,
             bloom,
+            duck,
         })
     }
 
@@ -42,6 +45,7 @@ impl CrawlerState {
     pub async fn run_ingest_pipeline(&mut self) -> Result<()> {
         let top_story_ids: Vec<i64> = fetch_top_stories(&self.client).await?;
         println!("取得したトップストーリーの総数: {}件", top_story_ids.len());
+        self.duck.insert_top_stories(&top_story_ids)?;
 
         let mut target_ids: Vec<i64> = Vec::new();
         for id in top_story_ids {

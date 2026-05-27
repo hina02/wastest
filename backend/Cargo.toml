@@ -2,13 +2,14 @@
 name = "wastest"
 version = "0.1.0"
 edition = "2024"
+default-run = "wastest"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 arrow = "58.3.0"
-duckdb = "1.10503.1"
+duckdb = { version = "1.10503.1", features = ["bundled"] }
 iceberg = "0.9.1"
 opendal = "0.56.0"
 reqwest = { version = "0.13.4", features = ["json"] }
@@ -23,6 +24,7 @@ bloomfilter = "3.0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0.102"
+dotenvy = "0.15"
 
 [profile.release]
 opt-level = "s" # サイズ最適化
