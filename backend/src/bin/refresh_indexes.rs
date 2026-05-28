@@ -1,15 +1,12 @@
-//! FTS index 単独リフレッシュ用 bin。
+//! 検索 index (FTS + HNSW) のリフレッシュ用 bin。
 //!
 //! 主な用途:
-//! - main pipeline とは独立に「FTS だけ再構築」したい時 (例: 別 cron, 手動 ad-hoc)
-//! - pipeline がエラーで FTS 再構築まで届かなかった時のリカバリ
-//! - 検索動作確認の前段に走らせる
+//! - main pipeline とは独立に再構築したい時 (例: 別 cron, 手動 ad-hoc)
+//! - pipeline がエラーで refresh まで届かなかった時のリカバリ
+//! - 検索動作確認の前段
 //!
-//! main.rs では引き続き pipeline 末尾で `refresh_fts_indexes` を呼ぶので、
+//! main.rs では pipeline 末尾で `refresh_search_indexes` を呼ぶので、
 //! 通常運用ではこの bin を別途叩く必要はない。
-//!
-//! HNSW (VSS) も同様に分離したくなったら、本ファイルに足すか
-//! `refresh_vss_indexes.rs` として別 bin にする。
 //!
 //! ```
 //! cargo run --bin refresh_indexes
@@ -30,7 +27,7 @@ async fn main() -> Result<()> {
         .init();
 
     let writer = DuckDBWriter::new(&SETTINGS.duckdb_path)?;
-    writer.refresh_fts_indexes()?;
-    println!("FTS indexes refreshed");
+    writer.refresh_search_indexes()?;
+    println!("search indexes (FTS + HNSW) refreshed");
     Ok(())
 }

@@ -1,6 +1,6 @@
 -- コアスキーマ。`DuckDBWriter::new` で実行される。
 -- VSS / FTS extension の INSTALL/LOAD は実行時の bundled DuckDB バージョンに
--- 依存するので、ここでは扱わない。embedding は FLOAT[1536] (built-in 固定長配列)
+-- 依存するので、ここでは扱わない。
 -- なので VSS なしでもカラム自体は作れる。
 -- HNSW index / FTS index の作成は DuckDBWriter::create_vector_index() /
 -- create_fts_indexes() を必要なタイミングで明示的に呼ぶ。
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS statements (
     content_id BIGINT NOT NULL,
     statement TEXT NOT NULL,
     keywords TEXT[],
-    embedding FLOAT[1536]
+    embedding FLOAT[3072]
 );
 
 CREATE TABLE IF NOT EXISTS code_blocks (

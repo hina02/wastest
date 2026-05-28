@@ -84,15 +84,17 @@ enum DbWrite {
         content_id: i64,
         statement: String,
         keywords: Vec<String>,
+        embedding: Option<Vec<f32>>,
     },
 }
 
+/// embedding 次元数。Gemini embedding-2 のフル次元 (3072) をそのまま保存する。
+/// `truncate_and_cast` の `take(EMBEDDING_DIMS)` は将来の API 仕様変動に対する
+/// 防御で、Gemini が 3072 を返している限り no-op。
+const EMBEDDING_DIMS: usize = 3072;
+
 /// 本番エントリ: SQLite hn_items を起点に、未処理の URL だけ流す。
-pub async fn run_pipeline<P>(
-    pool: &SqlitePool,
-    client: Arc<P>,
-    writer: &DuckDBWriter,
-) -> Result<()>
+pub async fn run_pipeline<P>(pool: &SqlitePool, client: Arc<P>, writer: &DuckDBWriter) -> Result<()>
 where
     P: LlmProvider + 'static,
 {
@@ -259,10 +261,18 @@ where
             let client = client.clone();
             let tx = writer_tx.clone();
             async move {
-                match client.extract_statement(&req.content).await {
-                    Ok(stmts) => forward_statements(req.content_id, stmts, &tx).await,
-                    Err(e) => warn!(content_id = req.content_id, error = %e, "extract failed"),
+                let stmts = match client.extract_statement(&req.content).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(content_id = req.content_id, error = %e, "extract failed");
+                        return;
+                    }
+                };
+                if stmts.is_empty() {
+                    return;
                 }
+                let embeddings = embed_or_warn(&client, req.content_id, &stmts).await;
+                forward_statements(req.content_id, stmts, embeddings, &tx).await;
             }
         })
         .buffer_unordered(LLM_CONCURRENCY)
@@ -271,18 +281,51 @@ where
     Ok(())
 }
 
+/// statements を embed する。失敗時は warn して `None` ベクトル群を返し、
+/// 呼び出し側が NULL embedding として書き込めるようにする。
+async fn embed_or_warn<P>(
+    client: &Arc<P>,
+    content_id: i64,
+    stmts: &[Statement],
+) -> Vec<Option<Vec<f32>>>
+where
+    P: LlmProvider,
+{
+    let texts: Vec<String> = stmts.iter().map(|s| s.statement.clone()).collect();
+    match client.embed_texts(texts).await {
+        Ok(vecs) => vecs
+            .into_iter()
+            .map(|v| Some(truncate_and_cast(v)))
+            .collect(),
+        Err(e) => {
+            warn!(content_id, error = %e, "embed failed; insert with NULL embedding");
+            vec![None; stmts.len()]
+        }
+    }
+}
+
+/// f64 ベクトルを EMBEDDING_DIMS まで truncate し、f32 (DuckDB FLOAT) に変換。
+fn truncate_and_cast(v: Vec<f64>) -> Vec<f32> {
+    v.into_iter()
+        .take(EMBEDDING_DIMS)
+        .map(|x| x as f32)
+        .collect()
+}
+
 async fn forward_statements(
     content_id: i64,
     stmts: Vec<Statement>,
+    embeddings: Vec<Option<Vec<f32>>>,
     tx: &mpsc::Sender<DbWrite>,
 ) {
-    for s in stmts {
+    for (s, emb) in stmts.into_iter().zip(embeddings) {
         if tx
             .send(DbWrite::Statement {
                 id: Uuid::now_v7(),
                 content_id,
                 statement: s.statement,
                 keywords: s.keywords,
+                embedding: emb,
             })
             .await
             .is_err()
@@ -302,7 +345,8 @@ async fn forward_statements(
 async fn writer_actor(conn: Connection, mut rx: mpsc::Receiver<DbWrite>) -> Result<()> {
     let mut content_buf: Vec<(i64, String, String)> = Vec::with_capacity(CONTENT_BATCH);
     let mut code_buf: Vec<(Uuid, i64, String)> = Vec::with_capacity(CODE_BLOCK_BATCH);
-    let mut stmt_buf: Vec<(Uuid, i64, String, Vec<String>)> = Vec::with_capacity(STATEMENT_BATCH);
+    let mut stmt_buf: Vec<(Uuid, i64, String, Vec<String>, Option<Vec<f32>>)> =
+        Vec::with_capacity(STATEMENT_BATCH);
 
     while let Some(msg) = rx.recv().await {
         match msg {
@@ -327,8 +371,9 @@ async fn writer_actor(conn: Connection, mut rx: mpsc::Receiver<DbWrite>) -> Resu
                 content_id,
                 statement,
                 keywords,
+                embedding,
             } => {
-                stmt_buf.push((id, content_id, statement, keywords));
+                stmt_buf.push((id, content_id, statement, keywords, embedding));
                 if stmt_buf.len() >= STATEMENT_BATCH {
                     flush_statements(&conn, &mut stmt_buf)?;
                 }
@@ -376,24 +421,27 @@ fn flush_code_blocks(conn: &Connection, buf: &mut Vec<(Uuid, i64, String)>) -> R
 }
 
 /// statements の flush。
-/// `keywords` は `TEXT[]` 列。DuckDB 自体は配列をネイティブに保存・クエリできる
-/// (`list_contains`, `unnest`, `array_length` 等が動く) が、duckdb-rs / C API の
-/// パラメータ bind では List 型を渡せない (`duckdb_bind_value` 側の未実装)。
-/// そのため keywords は SQL リテラル `['a','b']` 形式で埋め込み、
-/// 他のカラムだけ `?` で bind する。embedding は後段で埋めるので NULL リテラル。
+/// `keywords` (TEXT[]) と `embedding` (FLOAT[3072]) はどちらも DuckDB のネイティブ配列型
+/// だが、duckdb-rs / C API の `duckdb_bind_value` は List 型 bind 未対応なので
+/// SQL リテラルとして直接埋め込み、その他のカラムを `?` で bind する。
+/// embedding が None の場合は NULL を入れる。
 fn flush_statements(
     conn: &Connection,
-    buf: &mut Vec<(Uuid, i64, String, Vec<String>)>,
+    buf: &mut Vec<(Uuid, i64, String, Vec<String>, Option<Vec<f32>>)>,
 ) -> Result<()> {
     if buf.is_empty() {
         return Ok(());
     }
     let n = buf.len();
-    for (id, content_id, statement, keywords) in buf.drain(..) {
+    for (id, content_id, statement, keywords, embedding) in buf.drain(..) {
         let kw_lit = format_text_array(&keywords);
+        let emb_lit = match embedding.as_deref() {
+            Some(v) => format_float_array(v),
+            None => "NULL".to_string(),
+        };
         let sql = format!(
             "INSERT INTO statements (id, content_id, statement, keywords, embedding)
-             VALUES (?, ?, ?, {kw_lit}, NULL)"
+             VALUES (?, ?, ?, {kw_lit}, {emb_lit})"
         );
         conn.execute(&sql, params![id, content_id, statement])?;
     }
@@ -412,4 +460,11 @@ fn format_text_array(items: &[String]) -> String {
         .map(|s| format!("'{}'", s.replace('\'', "''")))
         .collect();
     format!("[{}]", parts.join(","))
+}
+
+/// `&[f32]` を DuckDB の `FLOAT[EMBEDDING_DIMS]` リテラルに変換する。
+/// 例: `[0.1, -0.05, ...]::FLOAT[3072]`。Rust の f32 Display は最短往復可能形式。
+fn format_float_array(v: &[f32]) -> String {
+    let parts: Vec<String> = v.iter().map(|x| x.to_string()).collect();
+    format!("[{}]::FLOAT[{}]", parts.join(","), EMBEDDING_DIMS)
 }

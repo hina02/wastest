@@ -26,9 +26,10 @@ async fn main() -> Result<()> {
     let llm = Arc::new(GeminiClient::new().await?);
     run_pipeline(&state.pool, llm, &state.duck).await?;
 
-    // 3) FTS index をリフレッシュ (DuckDB FTS は snapshot 型なので毎回 PRAGMA で再構築)
-    //    VSS / HNSW は embedding 実装後に refresh_search_indexes に統合する
-    state.duck.refresh_fts_indexes()?;
+    // 3) 検索 index リフレッシュ:
+    //    - FTS: snapshot 型なので PRAGMA で毎回再構築
+    //    - HNSW: IF NOT EXISTS の冪等作成 (一度作れば INSERT 自動追従)
+    state.duck.refresh_search_indexes()?;
 
     Ok(())
 }
