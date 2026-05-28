@@ -1,5 +1,6 @@
 use duckdb::types::Value;
 use duckdb::{Connection, Result};
+use crate::config::SETTINGS;
 
 pub struct DuckDBClient {
     pub conn: Connection,
@@ -76,17 +77,16 @@ impl DuckDBClient {
     }
 
     /// Task 2 (Write): SQLite のデータを S3 へ Hive パーティション形式でエクスポート
-    pub fn export_to_s3_lake(&self, bucket_id: &str) -> Result<()> {
-        // DuckDBに動的にコピー文を作らせて実行する堅牢なアプローチ
+    pub fn export_to_s3_lake(&self) -> Result<()> {
         let generate_sql = format!(
             "SELECT format(
-                'COPY (SELECT * FROM sqlite_scan(''wastest.db'', ''hn_items'')) 
+                'COPY (SELECT * FROM sqlite_scan(''wastest.db'', ''hn_items''))
                  TO ''s3://{}/archive/hn_items/year=%s/month=%s/day=%s/hn_items.parquet'' (FORMAT PARQUET, COMPRESSION ''ZSTD'');',
                 strftime(current_timestamp, '%Y'),
                 strftime(current_timestamp, '%m'),
                 strftime(current_timestamp, '%d')
             );",
-            bucket_id
+            SETTINGS.s3_bucket_id
         );
 
         let export_sql: String = self.conn.query_row(&generate_sql, [], |row| row.get(0))?;

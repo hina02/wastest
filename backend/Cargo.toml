@@ -26,6 +26,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0.102"
 dotenvy = "0.15"
 chrono = "0.4.44"
+secrecy = { version = "0.10.3", features = ["serde"] }
+envy = "0.4.2"
+rig-core = "0.21"
+scraper = "0.23.1"
+url = "2.5.4"
+tiktoken-rs = "0.11.0"
 
 [profile.release]
 opt-level = "s" # サイズ最適化

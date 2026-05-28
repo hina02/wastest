@@ -27,13 +27,13 @@ fn main() -> Result<()> {
     );
 
     // コアロジック呼び出し (Write)
-    client.export_to_s3_lake(bucket_id)?;
+    client.export_to_s3_lake()?;
     println!("✅ S3へのParquet出力が完了しました。\n");
 
     println!("--- S3の全アーカイブからのクエリ (最新状態の動的解決) ---");
 
     // コアロジック呼び出し (Read)
-    let latest_items = client.query_latest_from_s3_lake(bucket_id, 5)?;
+    let latest_items = client.query_latest_from_s3_lake(&bucket_id, 5)?;
 
     println!("▼ 重複排除された最新の5件 (S3データレイク全体からクエリ):");
     for (id, title, time, archive_date) in latest_items {

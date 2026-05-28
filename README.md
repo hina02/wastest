@@ -54,7 +54,7 @@ Stable Phase: Lambda + EventBridge
 1. **Fetch & Parse (Rust)**
    - 対象のHNアイテムから、コードネイティブにHTML本文を取得。
    - DOMツリーから不要な装飾を削ぎ落とし、クリーンなテキストとしてAgentへ渡す。
-2. **Agent Extraction (Python/PydanticAI 等)**
+2. **Agent Extraction (Rig-core + tokio)**
    - LLMを使用し、テキストから「ステートメント（配列）」と「キーワード（配列）」のみを抽出。
    - 抽出結果を `item_id` と共に別テーブル（または別ファイル）へ保存。
 3. **Storage & Search (DuckDB / LanceDB)**
