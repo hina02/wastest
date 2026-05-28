@@ -1,14 +1,15 @@
 // backend/src/bin/archive_hn_items.rs
 use anyhow::{Context, Result};
 use wastest::DuckDBWriter;
+use wastest::config::SETTINGS;
+
+const HN_NAMESPACE: &str = "hn";
 
 fn main() -> Result<()> {
-    // 1. 環境コンテキストの初期化
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt::init();
 
-    let db_path =
-        std::env::var("DUCKDB_PATH").context("DUCKDB_PATH が設定されていません (.env を確認)")?;
+    let db_path = SETTINGS.duckdb_path_for(HN_NAMESPACE);
     let s3_access_key = std::env::var("S3_ACCESS_KEY")
         .context("S3_ACCESS_KEY が設定されていません (.env を確認)")?;
     let s3_secret_key = std::env::var("S3_SECRET_KEY")
@@ -26,14 +27,14 @@ fn main() -> Result<()> {
         bucket_id
     );
 
-    // コアロジック呼び出し (Write)
-    client.export_to_s3_lake()?;
+    // コアロジック呼び出し (Write) — namespace "hn" の path 配下に置く
+    client.export_hn_items_to_s3(HN_NAMESPACE)?;
     println!("✅ S3へのParquet出力が完了しました。\n");
 
     println!("--- S3の全アーカイブからのクエリ (最新状態の動的解決) ---");
 
     // コアロジック呼び出し (Read)
-    let latest_items = client.query_latest_from_s3_lake(&bucket_id, 5)?;
+    let latest_items = client.query_latest_hn_items_from_s3(HN_NAMESPACE, &bucket_id, 5)?;
 
     println!("▼ 重複排除された最新の5件 (S3データレイク全体からクエリ):");
     for (id, title, time, archive_date) in latest_items {

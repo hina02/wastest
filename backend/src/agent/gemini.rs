@@ -15,6 +15,11 @@ use serde::Deserialize;
 const CHAT_MODEL: &str = "gemini-3-flash-preview";
 const EMBEDDING_MODEL: &str = "gemini-embedding-2";
 
+/// `gemini-embedding-2` が返すベクトル次元数。
+/// DDL の `embedding FLOAT[3072]` と統一する必要がある。
+/// provider を切り替えた場合はここと DDL の両方を直す。
+pub const EMBEDDING_DIMS: usize = 3072;
+
 pub struct GeminiClient {
     client: gemini::Client,
     extract_agent: Agent<CompletionModel>,

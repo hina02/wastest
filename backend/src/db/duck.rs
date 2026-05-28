@@ -104,9 +104,10 @@ pub trait DuckReadOps {
         Ok(results)
     }
 
-    /// 既に hn_contents に保存済みの id 集合。pipeline で URL を除外するのに使う。
+    /// 既に `contents` に保存済みの id 集合。
+    /// pipeline で URL を除外するのに使う。
     fn existing_content_ids(&self) -> Result<HashSet<i64>> {
-        let mut stmt = self.conn().prepare("SELECT id FROM hn_contents")?;
+        let mut stmt = self.conn().prepare("SELECT id FROM contents")?;
         let mut rows = stmt.query([])?;
         let mut ids = HashSet::new();
         while let Some(row) = rows.next()? {
@@ -115,19 +116,18 @@ pub trait DuckReadOps {
         Ok(ids)
     }
 
-    /// statements.embedding に対する VSS (cosine 距離) 検索。
+    /// statements.embedding に対する VSS (cosine similarity) 検索。
     /// 事前に呼び出し側が VSS extension をロードし、クエリベクトルを
     /// statements.embedding と同じ次元 (Gemini embedding-2 = 3072) の `&[f32]` で
     /// 渡す必要がある。HNSW index がなくても動くが、その場合は full scan になる。
     ///
-    /// 結果は cosine 距離 `<= VSS_HARD_THRESHOLD` のものに絞り、
-    /// `<= VSS_SOFT_THRESHOLD` を `Confident`、それ以上を `Marginal` でラベル付け。
+    /// 結果は similarity `>= VSS_SOFT_SIMILARITY` のものに絞り、
+    /// `>= VSS_HARD_SIMILARITY` を `Confident`、それ未満を `Marginal` でラベル付け。
     fn search_statements_vss(&self, query_vec: &[f32], limit: usize) -> Result<Vec<VssHit>> {
         let dim = query_vec.len();
         let vec_lit: Vec<String> = query_vec.iter().map(|x| x.to_string()).collect();
         // クエリベクトルは List binding 不可なので SQL に直接埋め込み。
-        // 距離フィルタを ORDER BY の前にかけると HNSW index が効かなくなることが
-        // あるので、まず top-K を取り、Rust 側で hard 閾値以下に絞る。
+        // similarity フィルタは Rust 側で early break する (HNSW の order に乗ったまま処理)。
         let sql = format!(
             "SELECT id, content_id, statement, keywords,
                     array_cosine_distance(embedding, [{vec}]::FLOAT[{dim}]) AS dist
@@ -213,8 +213,8 @@ pub trait DuckReadOps {
     /// 各検索で内部的に上位 `HYBRID_FETCH` 件を取り、`statement_id` をキーに重複排除しつつ
     /// `rrf_score = sum over rankings: 1 / (RRF_K + rank)` でスコアリングし、降順に `limit` 件返す。
     ///
-    /// VSS 側は通常の `search_statements_vss` を経由するため hard 閾値 (`VSS_HARD_THRESHOLD`)
-    /// より遠いベクトルは混ぜない。
+    /// VSS 側は通常の `search_statements_vss` を経由するため soft 閾値 (`VSS_SOFT_SIMILARITY`)
+    /// 未満の類似度は混ぜない。
     fn search_hybrid(
         &self,
         query_text: &str,
@@ -302,12 +302,24 @@ impl DuckDBWriter {
     pub fn new(db_path: &str) -> Result<Self> {
         let conn = Connection::open(db_path)?;
         conn.execute_batch(include_str!("../../../ddl/duckdb.sql"))?;
-        Ok(Self { conn })
+        let writer = Self { conn };
+        // statements に HNSW index がある場合、INSERT/UPDATE/DELETE は VSS extension を
+        // 要求するので、初期化時にロードしておく (DDL から外したのは「コアスキーマ作成を
+        // 拡張に依存させない」ため、ここでは index 操作可能性を確保するためにロードする)。
+        writer.setup_vss()?;
+        Ok(writer)
     }
 
     /// 別タスク (Writer Actor 等) に渡す用の追加コネクション。
+    /// extension は connection ごとに LOAD が必要なので、ここで VSS をロードする
+    /// (statements への INSERT/DELETE が HNSW index を経由するため必須)。
+    /// ロード失敗は warn 留め (extension が無い環境でも全体は壊さない)。
     pub fn try_clone_conn(&self) -> Result<Connection> {
-        self.conn.try_clone()
+        let conn = self.conn.try_clone()?;
+        if let Err(e) = conn.execute_batch("INSTALL vss; LOAD vss;") {
+            warn!(error = %e, "failed to load vss on cloned connection");
+        }
+        Ok(conn)
     }
 
     pub fn insert_top_stories(&self, item_ids: &[i64]) -> Result<()> {
@@ -350,12 +362,17 @@ impl DuckDBWriter {
         Ok(())
     }
 
-    /// SQLite のデータを S3 へ Hive パーティション形式でエクスポート
-    pub fn export_to_s3_lake(&self) -> Result<()> {
+    /// SQLite の `hn_items` を S3 へ Hive パーティション形式でエクスポート。
+    /// path: `s3://{bucket}/archive/{namespace}/hn_items/year=YYYY/month=MM/day=DD/hn_items.parquet`
+    ///
+    /// 現状 `hn_items` は HN 専属テーブルなので呼び出し側は `namespace="hn"` を渡すことが多いが、
+    /// 別の SQLite ingest source ができた場合に備えて引数化してある。
+    /// DuckDB 側の contents/statements/code_blocks の export は別関数として追加予定。
+    pub fn export_hn_items_to_s3(&self, namespace: &str) -> Result<()> {
         let generate_sql = format!(
             "SELECT format(
                 'COPY (SELECT * FROM sqlite_scan(''wastest.db'', ''hn_items''))
-                 TO ''s3://{}/archive/hn_items/year=%s/month=%s/day=%s/hn_items.parquet'' (FORMAT PARQUET, COMPRESSION ''ZSTD'');',
+                 TO ''s3://{}/archive/{namespace}/hn_items/year=%s/month=%s/day=%s/hn_items.parquet'' (FORMAT PARQUET, COMPRESSION ''ZSTD'');',
                 strftime(current_timestamp, '%Y'),
                 strftime(current_timestamp, '%m'),
                 strftime(current_timestamp, '%d')
@@ -368,10 +385,12 @@ impl DuckDBWriter {
         Ok(())
     }
 
-    /// S3 データレイク全体の全履歴から、各アイテムの最新状態を取得。
+    /// S3 データレイクの `hn_items` 履歴から、各アイテムの最新状態を取得。
     /// `setup_s3_environment` の Secret 設定が必要なので Writer 側に置く。
-    pub fn query_latest_from_s3_lake(
+    /// `namespace` は path 上の prefix (例: "hn") で、`export_hn_items_to_s3` と対称的に指定する。
+    pub fn query_latest_hn_items_from_s3(
         &self,
+        namespace: &str,
         bucket_id: &str,
         limit: usize,
     ) -> Result<Vec<(i64, String, i64, String)>> {
@@ -384,15 +403,14 @@ impl DuckDBWriter {
                     time,
                     year, month, day,
                     ROW_NUMBER() OVER (PARTITION BY id ORDER BY time DESC) as rn
-                FROM 's3://{}/archive/hn_items/year=*/month=*/day=*/*.parquet'
+                FROM 's3://{bucket_id}/archive/{namespace}/hn_items/year=*/month=*/day=*/*.parquet'
             )
             SELECT id, title, time, (year || '-' || month || '-' || day) as archive_date
             FROM ranked_items
             WHERE rn = 1
             ORDER BY time DESC
-            LIMIT {};
-            ",
-            bucket_id, limit
+            LIMIT {limit};
+            "
         );
 
         let mut stmt = self.conn.prepare(&read_sql)?;
@@ -404,12 +422,27 @@ impl DuckDBWriter {
         Ok(results)
     }
 
-    /// VSS extension を読み込む。bundled DuckDB と extension のバージョン不整合等で
-    /// 失敗することがあるので、warn に留めて続行可能にしてある。
-    /// `create_vector_index` を呼ぶ前にこれを呼ぶ。
+    /// VSS extension を読み込み、永続 DB ファイルでも HNSW を作れるようにする。
+    /// `hnsw_enable_experimental_persistence` は Connection ごとにセットが必要なので
+    /// 検索 Reader 側でも同じ手順を踏むこと。
+    /// 失敗は warn 留めにして続行可能にする (extension が無い環境でも全体は壊れない)。
+    ///
+    /// execute_batch に複数 statement を渡すと後段が黙ってスキップされる場合があるので
+    /// 個別 call に分割している。
     pub fn setup_vss(&self) -> Result<()> {
-        if let Err(e) = self.conn.execute_batch("INSTALL vss; LOAD vss;") {
-            warn!(error = %e, "setup_vss failed (network or version mismatch?)");
+        if let Err(e) = self.conn.execute_batch("INSTALL vss;") {
+            warn!(error = %e, "INSTALL vss failed");
+            return Ok(());
+        }
+        if let Err(e) = self.conn.execute_batch("LOAD vss;") {
+            warn!(error = %e, "LOAD vss failed");
+            return Ok(());
+        }
+        if let Err(e) = self
+            .conn
+            .execute_batch("SET hnsw_enable_experimental_persistence = true;")
+        {
+            warn!(error = %e, "SET hnsw_enable_experimental_persistence failed");
         }
         Ok(())
     }

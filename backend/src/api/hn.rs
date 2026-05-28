@@ -1,14 +1,38 @@
-use crate::db::duck::DuckDBWriter;
-use crate::db::hn::{CreateHNItem, create_many, exists};
+use crate::agent::LlmProvider;
+use crate::db::duck::{DuckDBWriter, DuckReadOps};
+use crate::db::hn::{CreateHNItem, create_many, exists, list_urls};
+use crate::pipeline::run_pipeline_with_urls;
 use anyhow::Result;
 use bloomfilter::Bloom;
 use futures::stream::{self, StreamExt};
 use serde::Deserialize;
 use sqlx::SqlitePool;
+use std::sync::Arc;
 use tracing::{info, warn};
 
 const BASE_URL: &str = "https://hacker-news.firebaseio.com";
 const BATCH_SIZE: usize = 5;
+
+/// HN 専用 ingest エントリ: SQLite `hn_items` を起点に未処理 URL を抽出 pipeline に流す。
+/// `writer` は HN 用 DuckDB ファイル (`<duckdb_dir>/hn.duckdb`) を開いたもの。
+/// 新しいドメインを足すときはこれを真似て別の関数を作るか、
+/// `run_pipeline_with_urls` を直接呼べばよい。
+pub async fn run_hn_pipeline<P>(
+    pool: &SqlitePool,
+    client: Arc<P>,
+    writer: &DuckDBWriter,
+) -> Result<()>
+where
+    P: LlmProvider + 'static,
+{
+    let all_urls = list_urls(pool).await?;
+    let existing = writer.existing_content_ids()?;
+    let urls: Vec<(i64, String)> = all_urls
+        .into_iter()
+        .filter(|(id, _)| !existing.contains(id))
+        .collect();
+    run_pipeline_with_urls(urls, client, writer).await
+}
 
 pub struct CrawlerState {
     pub pool: SqlitePool,

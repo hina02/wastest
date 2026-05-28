@@ -1,18 +1,16 @@
-//! 検索 index (FTS + HNSW) のリフレッシュ用 bin。
+//! 指定 namespace の DuckDB ファイルで FTS + HNSW を再構築。
+//!
+//! ```
+//! cargo run --bin refresh_indexes -- hn
+//! cargo run --bin refresh_indexes -- smoke
+//! ```
 //!
 //! 主な用途:
-//! - main pipeline とは独立に再構築したい時 (例: 別 cron, 手動 ad-hoc)
+//! - main pipeline と独立して再構築したい時 (例: 別 cron, 手動 ad-hoc)
 //! - pipeline がエラーで refresh まで届かなかった時のリカバリ
 //! - 検索動作確認の前段
-//!
-//! main.rs では pipeline 末尾で `refresh_search_indexes` を呼ぶので、
-//! 通常運用ではこの bin を別途叩く必要はない。
-//!
-//! ```
-//! cargo run --bin refresh_indexes
-//! ```
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing_subscriber::EnvFilter;
 use wastest::DuckDBWriter;
 use wastest::config::SETTINGS;
@@ -26,8 +24,13 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let writer = DuckDBWriter::new(&SETTINGS.duckdb_path)?;
+    let namespace = std::env::args()
+        .nth(1)
+        .context("usage: refresh_indexes <namespace>")?;
+    let db_path = SETTINGS.duckdb_path_for(&namespace);
+
+    let writer = DuckDBWriter::new(&db_path)?;
     writer.refresh_search_indexes()?;
-    println!("search indexes (FTS + HNSW) refreshed");
+    println!("search indexes (FTS + HNSW) refreshed for namespace={namespace}");
     Ok(())
 }

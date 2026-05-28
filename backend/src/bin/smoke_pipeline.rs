@@ -1,4 +1,6 @@
 //! Stage1 → Splitter → Stage2 → Writer Actor の動作確認。
+//! namespace = "smoke" の DuckDB ファイル (`<duckdb_dir>/smoke.duckdb`) を使うので
+//! 本番データ ("hn.duckdb" 等) と混ざらない。
 //!
 //! 使い方:
 //! ```
@@ -8,7 +10,7 @@
 //!
 //! 流れ:
 //! 1. テスト用 ID (9_000_000_001..) で URL を組み立てる
-//! 2. hn_contents / code_blocks / statements から該当 ID を一度削除 (再実行可能に)
+//! 2. smoke.duckdb の statements/code_blocks/contents を全削除 (テスト用 namespace なので一括 OK)
 //! 3. `run_pipeline_with_urls` で実行
 //! 4. 投入された行数を SELECT して表示
 
@@ -20,6 +22,7 @@ use wastest::pipeline::run_pipeline_with_urls;
 use wastest::{DuckDBWriter, GeminiClient};
 
 const TEST_ID_BASE: i64 = 9_000_000_001;
+const NAMESPACE: &str = "smoke";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -34,7 +37,10 @@ async fn main() -> Result<()> {
     let urls: Vec<(i64, String)> = if args.is_empty() {
         vec![
             (TEST_ID_BASE, "https://en.wikipedia.org/wiki/DuckDB".to_string()),
-            (TEST_ID_BASE + 1, "https://en.wikipedia.org/wiki/Hacker_News".to_string()),
+            (
+                TEST_ID_BASE + 1,
+                "https://en.wikipedia.org/wiki/Hacker_News".to_string(),
+            ),
         ]
     } else {
         args.into_iter()
@@ -43,71 +49,50 @@ async fn main() -> Result<()> {
             .collect()
     };
 
-    println!("--- 対象 URL ---");
+    let db_path = SETTINGS.duckdb_path_for(NAMESPACE);
+    println!("--- 対象 URL (namespace={NAMESPACE}, file={db_path}) ---");
     for (id, url) in &urls {
         println!("  [{id}] {url}");
     }
 
-    let writer = DuckDBWriter::new(&SETTINGS.duckdb_path)?;
+    let writer = DuckDBWriter::new(&db_path)?;
     let probe_conn = writer.try_clone_conn()?;
 
-    cleanup(&probe_conn, &urls)?;
+    cleanup(&probe_conn)?;
 
     let client = Arc::new(GeminiClient::new().await?);
-    run_pipeline_with_urls(urls.clone(), client, &writer).await?;
+    run_pipeline_with_urls(urls, client, &writer).await?;
 
-    report(&probe_conn, &urls)?;
+    report(&probe_conn)?;
     Ok(())
 }
 
-fn ids_csv(urls: &[(i64, String)]) -> String {
-    urls.iter()
-        .map(|(id, _)| id.to_string())
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn cleanup(conn: &duckdb::Connection, urls: &[(i64, String)]) -> Result<()> {
-    let ids = ids_csv(urls);
-    conn.execute_batch(&format!(
-        "DELETE FROM statements WHERE content_id IN ({ids});
-         DELETE FROM code_blocks WHERE content_id IN ({ids});
-         DELETE FROM hn_contents WHERE id IN ({ids});"
-    ))?;
+fn cleanup(conn: &duckdb::Connection) -> Result<()> {
+    // smoke DB ファイル丸ごとの全削除 (テスト用ファイルなので OK)
+    conn.execute_batch(
+        "DELETE FROM statements;
+         DELETE FROM code_blocks;
+         DELETE FROM contents;",
+    )?;
     println!("--- 既存テストデータ削除完了 ---");
     Ok(())
 }
 
-fn report(conn: &duckdb::Connection, urls: &[(i64, String)]) -> Result<()> {
-    let ids = ids_csv(urls);
-    let content_count: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM hn_contents WHERE id IN ({ids})"),
-        [],
-        |row| row.get(0),
-    )?;
-    let stmt_count: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM statements WHERE content_id IN ({ids})"),
-        [],
-        |row| row.get(0),
-    )?;
-    let code_count: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM code_blocks WHERE content_id IN ({ids})"),
-        [],
-        |row| row.get(0),
-    )?;
+fn report(conn: &duckdb::Connection) -> Result<()> {
+    let content_count: i64 = conn.query_row("SELECT COUNT(*) FROM contents", [], |r| r.get(0))?;
+    let stmt_count: i64 = conn.query_row("SELECT COUNT(*) FROM statements", [], |r| r.get(0))?;
+    let code_count: i64 = conn.query_row("SELECT COUNT(*) FROM code_blocks", [], |r| r.get(0))?;
 
-    println!("\n--- 投入結果 (対象 ID のみ) ---");
-    println!("  hn_contents: {content_count}");
-    println!("  code_blocks: {code_count}");
-    println!("  statements:  {stmt_count}");
+    println!("\n--- 投入結果 ---");
+    println!("  contents:   {content_count}");
+    println!("  code_blocks:{code_count}");
+    println!("  statements: {stmt_count}");
 
     if content_count > 0 {
         println!("\n--- statements サンプル (先頭3件) ---");
-        let mut stmt = conn.prepare(&format!(
-            "SELECT content_id, statement, keywords
-             FROM statements WHERE content_id IN ({ids})
-             LIMIT 3"
-        ))?;
+        let mut stmt = conn.prepare(
+            "SELECT content_id, statement, keywords FROM statements LIMIT 3",
+        )?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let cid: i64 = row.get(0)?;

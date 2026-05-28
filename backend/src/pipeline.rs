@@ -1,12 +1,17 @@
-//! 日次パイプライン: hn_items の URL を起点に
-//! Stage 1 (fetch + parse) → Splitter (fan-out)
-//! → Stage 2 (LLM extract)
-//! の3つの生産タスクが、唯一の DB writer である Writer Actor に
-//! `DbWrite` enum を投げ込む構成。
+//! ドメイン非依存の抽出 pipeline。
+//! 入力は `(id, url)` の列、出力は 1つの DuckDB ファイル内の
+//! `contents` / `code_blocks` / `statements` テーブルへの INSERT。
+//!
+//! namespace 分離はファイルレベルで行うため、pipeline は namespace の概念を持たない。
+//! 呼び出し側 (main, smoke_pipeline, ingest_urls 等) が namespace に対応する
+//! DuckDB ファイルを開いた `DuckDBWriter` を渡す。
+//! HN 専用エントリ (`run_hn_pipeline`) は `api::hn` 側にあり、HN namespace のファイルを使う。
 //!
 //! 構造:
 //! ```text
-//! Stage 1 (fetch+parse, n=20)
+//! URL list
+//!   ▼
+//! Stage 1 (fetch+parse, n=FETCH_CONCURRENCY)
 //!   │ ContentRecord
 //!   ▼
 //! Splitter ───→ DbWrite::Content / CodeBlock ──┐
@@ -14,31 +19,31 @@
 //!   └→ ExtractRequest                          │
 //!         │                                    │
 //!         ▼                                    │
-//!       Stage 2 (LLM, n=10)                    │
+//!       Stage 2 (LLM extract + embed,          │
+//!                n=LLM_CONCURRENCY)            │
 //!         │                                    │
 //!         └─→ DbWrite::Statement ──────────────┤
 //!                                              ▼
-//!                                       Writer Actor
-//!                                       (Connection 1個所有,
-//!                                        テーブル別 buffer で batch flush)
+//!                                       Writer Actor (Connection 1個所有,
+//!                                                     テーブル別 buffer で batch flush)
 //! ```
 //!
-//! Writer Actor 設計の利点:
-//! - DB Connection は1個だけ。`try_clone_conn` も1回呼ぶだけ
-//! - 書き込み箇所が1ヶ所に集約され、将来トランザクション化しやすい
-//! - テーブル追加は `DbWrite` の variant 追加で完結
-//! - 全生産タスクが `writer_tx` を drop すると Actor が自然終了
+//! 設計上のポイント:
+//! - Writer Actor は唯一の DB writer。`try_clone_conn` を1回呼ぶだけで済む。
+//! - テーブル追加は `DbWrite` の variant + `*Row` 構造体 + `flush_*` を追加するだけで完結。
+//! - 全生産タスクが `writer_tx` を drop すると Actor が自然終了する (channel close で recv が None)。
+//! - 失敗時の挙動: Stage 1 の fetch 失敗 / Stage 2 の LLM 失敗 は warn のみで継続、
+//!   embed 失敗時は NULL embedding で statement を保存。
 
+use crate::agent::gemini::EMBEDDING_DIMS;
 use crate::agent::{LlmProvider, Statement};
 use crate::api::parse::fetch_html;
-use crate::db::duck::{DuckDBWriter, DuckReadOps};
-use crate::db::hn::list_urls;
+use crate::db::duck::DuckDBWriter;
 use crate::parse::html::parse_html;
 use anyhow::{Context, Result};
 use duckdb::Connection;
 use duckdb::params;
 use futures::stream::StreamExt;
-use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -66,49 +71,41 @@ struct ExtractRequest {
     content: String,
 }
 
-/// Writer Actor が受け取る書き込みコマンド。
-/// テーブル追加時はここに variant を足す。
+/// `contents` 1 行に相当する書き込み単位。
+struct ContentRow {
+    id: i64,
+    url: String,
+    content: String,
+}
+
+/// `code_blocks` 1 行に相当する書き込み単位。
+struct CodeBlockRow {
+    id: Uuid,
+    content_id: i64,
+    code: String,
+}
+
+/// `statements` 1 行に相当する書き込み単位。
+struct StatementRow {
+    id: Uuid,
+    content_id: i64,
+    statement: String,
+    keywords: Vec<String>,
+    embedding: Option<Vec<f32>>,
+}
+
+/// Writer Actor が受け取る書き込みコマンド。テーブル追加時はここに variant を足す。
+/// `namespace` は pipeline 1 run = 1 namespace なので writer_actor の起動引数で持ち、
+/// メッセージには含めない (per-msg のクローンを避ける)。
 enum DbWrite {
-    Content {
-        id: i64,
-        url: String,
-        content: String,
-    },
-    CodeBlock {
-        id: Uuid,
-        content_id: i64,
-        code: String,
-    },
-    Statement {
-        id: Uuid,
-        content_id: i64,
-        statement: String,
-        keywords: Vec<String>,
-        embedding: Option<Vec<f32>>,
-    },
+    Content(ContentRow),
+    CodeBlock(CodeBlockRow),
+    Statement(StatementRow),
 }
 
-/// embedding 次元数。Gemini embedding-2 のフル次元 (3072) をそのまま保存する。
-/// `truncate_and_cast` の `take(EMBEDDING_DIMS)` は将来の API 仕様変動に対する
-/// 防御で、Gemini が 3072 を返している限り no-op。
-const EMBEDDING_DIMS: usize = 3072;
-
-/// 本番エントリ: SQLite hn_items を起点に、未処理の URL だけ流す。
-pub async fn run_pipeline<P>(pool: &SqlitePool, client: Arc<P>, writer: &DuckDBWriter) -> Result<()>
-where
-    P: LlmProvider + 'static,
-{
-    let all_urls = list_urls(pool).await?;
-    let existing = writer.existing_content_ids()?;
-    let urls: Vec<(i64, String)> = all_urls
-        .into_iter()
-        .filter(|(id, _)| !existing.contains(id))
-        .collect();
-    run_pipeline_with_urls(urls, client, writer).await
-}
-
-/// 動作確認・部分実行用: 任意の URL リストを直接流す。
-/// 既存 id 重複の責務は呼び出し側に任せる。
+/// 汎用エントリ: 任意の URL リストで実行する。
+/// 既存 id 重複の責務は呼び出し側に任せる (`existing_content_ids` で除外しておく)。
+/// 書き込み先 DuckDB ファイルは `writer` に紐付いたもの (= 呼び出し側が選んだ namespace)。
 pub async fn run_pipeline_with_urls<P>(
     urls: Vec<(i64, String)>,
     client: Arc<P>,
@@ -127,6 +124,7 @@ where
     let (extract_tx, extract_rx) = mpsc::channel::<ExtractRequest>(CHANNEL_BUFFER);
     let (writer_tx, writer_rx) = mpsc::channel::<DbWrite>(CHANNEL_BUFFER);
 
+    // writer_conn は try_clone_conn 内で VSS をロード済み (HNSW index を持つ statements を触るため)。
     let writer_conn = writer.try_clone_conn()?;
 
     let s1 = tokio::spawn(stage1_fetch(urls, content_tx));
@@ -214,11 +212,11 @@ async fn splitter(
         }
 
         if writer_tx
-            .send(DbWrite::Content {
+            .send(DbWrite::Content(ContentRow {
                 id: rec.id,
                 url: rec.url,
                 content: rec.content,
-            })
+            }))
             .await
             .is_err()
         {
@@ -228,11 +226,11 @@ async fn splitter(
 
         for cb in rec.code_blocks {
             if writer_tx
-                .send(DbWrite::CodeBlock {
+                .send(DbWrite::CodeBlock(CodeBlockRow {
                     id: Uuid::now_v7(),
                     content_id: rec.id,
                     code: cb,
-                })
+                }))
                 .await
                 .is_err()
             {
@@ -320,13 +318,13 @@ async fn forward_statements(
 ) {
     for (s, emb) in stmts.into_iter().zip(embeddings) {
         if tx
-            .send(DbWrite::Statement {
+            .send(DbWrite::Statement(StatementRow {
                 id: Uuid::now_v7(),
                 content_id,
                 statement: s.statement,
                 keywords: s.keywords,
                 embedding: emb,
-            })
+            }))
             .await
             .is_err()
         {
@@ -343,37 +341,26 @@ async fn forward_statements(
 // ----------------------------------------------------------------
 
 async fn writer_actor(conn: Connection, mut rx: mpsc::Receiver<DbWrite>) -> Result<()> {
-    let mut content_buf: Vec<(i64, String, String)> = Vec::with_capacity(CONTENT_BATCH);
-    let mut code_buf: Vec<(Uuid, i64, String)> = Vec::with_capacity(CODE_BLOCK_BATCH);
-    let mut stmt_buf: Vec<(Uuid, i64, String, Vec<String>, Option<Vec<f32>>)> =
-        Vec::with_capacity(STATEMENT_BATCH);
+    let mut content_buf: Vec<ContentRow> = Vec::with_capacity(CONTENT_BATCH);
+    let mut code_buf: Vec<CodeBlockRow> = Vec::with_capacity(CODE_BLOCK_BATCH);
+    let mut stmt_buf: Vec<StatementRow> = Vec::with_capacity(STATEMENT_BATCH);
 
     while let Some(msg) = rx.recv().await {
         match msg {
-            DbWrite::Content { id, url, content } => {
-                content_buf.push((id, url, content));
+            DbWrite::Content(row) => {
+                content_buf.push(row);
                 if content_buf.len() >= CONTENT_BATCH {
                     flush_contents(&conn, &mut content_buf)?;
                 }
             }
-            DbWrite::CodeBlock {
-                id,
-                content_id,
-                code,
-            } => {
-                code_buf.push((id, content_id, code));
+            DbWrite::CodeBlock(row) => {
+                code_buf.push(row);
                 if code_buf.len() >= CODE_BLOCK_BATCH {
                     flush_code_blocks(&conn, &mut code_buf)?;
                 }
             }
-            DbWrite::Statement {
-                id,
-                content_id,
-                statement,
-                keywords,
-                embedding,
-            } => {
-                stmt_buf.push((id, content_id, statement, keywords, embedding));
+            DbWrite::Statement(row) => {
+                stmt_buf.push(row);
                 if stmt_buf.len() >= STATEMENT_BATCH {
                     flush_statements(&conn, &mut stmt_buf)?;
                 }
@@ -396,24 +383,25 @@ async fn writer_actor(conn: Connection, mut rx: mpsc::Receiver<DbWrite>) -> Resu
 
 // ----------------------------------------------------------------
 // テーブル別 flush ヘルパー (writer_actor からのみ呼ばれる)
+// values の並びは DDL のカラム順 (Appender はカラム順依存)。
 // ----------------------------------------------------------------
 
-fn flush_contents(conn: &Connection, buf: &mut Vec<(i64, String, String)>) -> Result<()> {
+fn flush_contents(conn: &Connection, buf: &mut Vec<ContentRow>) -> Result<()> {
     let n = buf.len();
-    let mut app = conn.appender("hn_contents")?;
-    for (id, url, content) in buf.drain(..) {
-        app.append_row(params![id, url, content])?;
+    let mut app = conn.appender("contents")?;
+    for row in buf.drain(..) {
+        app.append_row(params![row.id, row.url, row.content])?;
     }
     app.flush()?;
-    info!(rows = n, "hn_contents flushed");
+    info!(rows = n, "contents flushed");
     Ok(())
 }
 
-fn flush_code_blocks(conn: &Connection, buf: &mut Vec<(Uuid, i64, String)>) -> Result<()> {
+fn flush_code_blocks(conn: &Connection, buf: &mut Vec<CodeBlockRow>) -> Result<()> {
     let n = buf.len();
     let mut app = conn.appender("code_blocks")?;
-    for (id, content_id, code) in buf.drain(..) {
-        app.append_row(params![id, content_id, code])?;
+    for row in buf.drain(..) {
+        app.append_row(params![row.id, row.content_id, row.code])?;
     }
     app.flush()?;
     info!(rows = n, "code_blocks flushed");
@@ -425,17 +413,14 @@ fn flush_code_blocks(conn: &Connection, buf: &mut Vec<(Uuid, i64, String)>) -> R
 /// だが、duckdb-rs / C API の `duckdb_bind_value` は List 型 bind 未対応なので
 /// SQL リテラルとして直接埋め込み、その他のカラムを `?` で bind する。
 /// embedding が None の場合は NULL を入れる。
-fn flush_statements(
-    conn: &Connection,
-    buf: &mut Vec<(Uuid, i64, String, Vec<String>, Option<Vec<f32>>)>,
-) -> Result<()> {
+fn flush_statements(conn: &Connection, buf: &mut Vec<StatementRow>) -> Result<()> {
     if buf.is_empty() {
         return Ok(());
     }
     let n = buf.len();
-    for (id, content_id, statement, keywords, embedding) in buf.drain(..) {
-        let kw_lit = format_text_array(&keywords);
-        let emb_lit = match embedding.as_deref() {
+    for row in buf.drain(..) {
+        let kw_lit = format_text_array(&row.keywords);
+        let emb_lit = match row.embedding.as_deref() {
             Some(v) => format_float_array(v),
             None => "NULL".to_string(),
         };
@@ -443,7 +428,7 @@ fn flush_statements(
             "INSERT INTO statements (id, content_id, statement, keywords, embedding)
              VALUES (?, ?, ?, {kw_lit}, {emb_lit})"
         );
-        conn.execute(&sql, params![id, content_id, statement])?;
+        conn.execute(&sql, params![row.id, row.content_id, row.statement])?;
     }
     info!(rows = n, "statements flushed");
     Ok(())
