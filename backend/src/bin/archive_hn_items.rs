@@ -1,6 +1,6 @@
 // backend/src/bin/archive_hn_items.rs
 use anyhow::{Context, Result};
-use wastest::db::duck::DuckDBClient;
+use wastest::DuckDBWriter;
 
 fn main() -> Result<()> {
     // 1. 環境コンテキストの初期化
@@ -17,7 +17,7 @@ fn main() -> Result<()> {
         std::env::var("S3_BUCKET_ID").context("S3_BUCKET_ID が設定されていません (.env を確認)")?;
 
     // 2. クライアント初期化とS3環境セットアップ
-    let client = DuckDBClient::new(&db_path)?;
+    let client = DuckDBWriter::new(&db_path)?;
     client.setup_s3_environment(&s3_access_key, &s3_secret_key)?;
 
     println!("--- Task 2: S3へのHiveパーティション形式での日次アーカイブ ---");

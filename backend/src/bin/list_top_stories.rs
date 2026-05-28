@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
-use wastest::db::duck::DuckDBClient;
+use wastest::{DuckDBReader, DuckReadOps};
 
 fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     let db_path =
         std::env::var("DUCKDB_PATH").context("DUCKDB_PATH が設定されていません (.env を確認)")?;
-    let client = DuckDBClient::new(&db_path)?;
+    let client = DuckDBReader::new(&db_path)?;
 
     println!("--- DuckDB: top_stories 履歴一覧 ---");
     let stories = client.fetch_all_stories()?;

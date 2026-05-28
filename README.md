@@ -52,14 +52,16 @@ Stable Phase: Lambda + EventBridge
 
 ### 🔄 Data Pipeline
 1. **Fetch & Parse (Rust)**
-   - 対象のHNアイテムから、コードネイティブにHTML本文を取得。
-   - DOMツリーから不要な装飾を削ぎ落とし、クリーンなテキストとしてAgentへ渡す。
 2. **Agent Extraction (Rig-core + tokio)**
-   - LLMを使用し、テキストから「ステートメント（配列）」と「キーワード（配列）」のみを抽出。
-   - 抽出結果を `item_id` と共に別テーブル（または別ファイル）へ保存。
 3. **Storage & Search (DuckDB / LanceDB)**
+   - **コード検索**
    - **メタデータ・キーワード検索**: DuckDB + Parquetファイルにより、過去のニュースを高速に全文検索・ソート。
    - **セマンティック検索（ベクトル検索）**: ステートメントのEmbeddingベクトルを保存し、クエリの意味に近い過去のニュースを検索。
    - 上記2つを `item_id` でJOINし、瞬時に元の記事を特定する。
 
 #### LanceDB Arrow format 
+
+
+## Extend
+YouTube Data API v3
+with gemini-embedding-2 

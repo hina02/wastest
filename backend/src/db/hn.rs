@@ -52,3 +52,10 @@ pub async fn delete_old_items(pool: &SqlitePool) -> Result<u64> {
 
     Ok(result.rows_affected())
 }
+
+pub async fn list_urls(pool: &SqlitePool) -> Result<Vec<(i64, String)>, sqlx::Error> {
+    let rows = sqlx::query!(r#"SELECT id, url FROM hn_items WHERE url != ''"#)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(|r| (r.id, r.url)).collect())
+}

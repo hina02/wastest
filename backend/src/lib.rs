@@ -3,9 +3,14 @@ pub mod api;
 pub mod config;
 pub mod db;
 pub mod parse;
+pub mod pipeline;
 
+pub use agent::LlmProvider;
+pub use agent::gemini::GeminiClient;
+pub use agent::openai::OpenAIClient;
 pub use api::hn::CrawlerState;
-pub use db::duck::DuckDBClient;
+pub use db::duck::{DuckDBReader, DuckDBWriter, DuckReadOps};
+pub use pipeline::run_pipeline;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
 pub async fn connect(database_url: &str) -> Result<SqlitePool, sqlx::Error> {

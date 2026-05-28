@@ -7,6 +7,7 @@ pub struct Settings {
     pub database_url: String,
     pub duckdb_path: String,
     pub openai_api_key: SecretString,
+    pub gemini_api_key: SecretString,
     pub s3_bucket_id: String,
     pub s3_access_key: SecretString,
     pub s3_secret_key: SecretString,

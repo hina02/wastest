@@ -1,4 +1,4 @@
-use crate::db::duck::DuckDBClient;
+use crate::db::duck::DuckDBWriter;
 use crate::db::hn::{CreateHNItem, create_many, exists};
 use anyhow::Result;
 use bloomfilter::Bloom;
@@ -14,11 +14,11 @@ pub struct CrawlerState {
     pub pool: SqlitePool,
     pub client: reqwest::Client,
     pub bloom: Bloom<i64>,
-    pub duck: DuckDBClient,
+    pub duck: DuckDBWriter,
 }
 
 impl CrawlerState {
-    pub async fn new(pool: SqlitePool, duck: DuckDBClient) -> Result<Self> {
+    pub async fn new(pool: SqlitePool, duck: DuckDBWriter) -> Result<Self> {
         let client = reqwest::Client::new();
         let mut bloom = Bloom::new_for_fp_rate(10_000_000, 0.01).map_err(anyhow::Error::msg)?;
 
