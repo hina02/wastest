@@ -34,6 +34,12 @@ scraper = "0.23.1"
 url = "2.5.4"
 tiktoken-rs = "0.11.0"
 uuid = { version = "1", features = ["v7"] }
+lancedb = "0.30.0"
+arrow-array = "58.3.0"
+arrow-schema = "58.3.0"
+lance-index = "7.0.0"
+tempfile = "3.27.0"
+arrow-buffer = "58.3.0"
 
 [profile.release]
 opt-level = "s" # サイズ最適化

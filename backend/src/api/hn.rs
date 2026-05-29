@@ -1,6 +1,6 @@
 use crate::agent::LlmProvider;
-use crate::db::duck::{DuckDBWriter, DuckReadOps};
 use crate::db::hn::{CreateHNItem, create_many, exists, list_urls};
+use crate::lance::LanceStore;
 use crate::pipeline::run_pipeline_with_urls;
 use anyhow::Result;
 use bloomfilter::Bloom;
@@ -14,35 +14,35 @@ const BASE_URL: &str = "https://hacker-news.firebaseio.com";
 const BATCH_SIZE: usize = 5;
 
 /// HN 専用 ingest エントリ: SQLite `hn_items` を起点に未処理 URL を抽出 pipeline に流す。
-/// `writer` は HN 用 DuckDB ファイル (`<duckdb_dir>/hn.duckdb`) を開いたもの。
+/// `store` は HN namespace 用の Lance dataset 群を持つ `LanceStore`。
 /// 新しいドメインを足すときはこれを真似て別の関数を作るか、
 /// `run_pipeline_with_urls` を直接呼べばよい。
 pub async fn run_hn_pipeline<P>(
     pool: &SqlitePool,
     client: Arc<P>,
-    writer: &DuckDBWriter,
+    store: Arc<LanceStore>,
 ) -> Result<()>
 where
     P: LlmProvider + 'static,
 {
     let all_urls = list_urls(pool).await?;
-    let existing = writer.existing_content_ids()?;
+    let existing = store.existing_content_ids().await?;
     let urls: Vec<(i64, String)> = all_urls
         .into_iter()
         .filter(|(id, _)| !existing.contains(id))
         .collect();
-    run_pipeline_with_urls(urls, client, writer).await
+    run_pipeline_with_urls(urls, client, store).await
 }
 
 pub struct CrawlerState {
     pub pool: SqlitePool,
     pub client: reqwest::Client,
     pub bloom: Bloom<i64>,
-    pub duck: DuckDBWriter,
+    pub store: Arc<LanceStore>,
 }
 
 impl CrawlerState {
-    pub async fn new(pool: SqlitePool, duck: DuckDBWriter) -> Result<Self> {
+    pub async fn new(pool: SqlitePool, store: Arc<LanceStore>) -> Result<Self> {
         let client = reqwest::Client::new();
         let mut bloom = Bloom::new_for_fp_rate(10_000_000, 0.01).map_err(anyhow::Error::msg)?;
 
@@ -59,7 +59,7 @@ impl CrawlerState {
             pool,
             client,
             bloom,
-            duck,
+            store,
         })
     }
 
@@ -67,7 +67,7 @@ impl CrawlerState {
     pub async fn run_ingest_pipeline(&mut self) -> Result<()> {
         let top_story_ids: Vec<i64> = fetch_top_stories(&self.client).await?;
         println!("取得したトップストーリーの総数: {}件", top_story_ids.len());
-        self.duck.insert_top_stories(&top_story_ids)?;
+        self.store.insert_top_stories(&top_story_ids).await?;
 
         let mut target_ids: Vec<i64> = Vec::new();
         for id in top_story_ids {

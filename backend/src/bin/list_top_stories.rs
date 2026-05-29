@@ -1,18 +1,19 @@
-//! HN namespace の top_stories 履歴を表示。
+//! HN namespace の top_stories 履歴を表示 (Lance + DuckDB read-only)。
 
 use anyhow::Result;
+use wastest::LanceReader;
 use wastest::config::SETTINGS;
-use wastest::{DuckDBReader, DuckReadOps};
 
 const HN_NAMESPACE: &str = "hn";
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
-    let db_path = SETTINGS.duckdb_path_for(HN_NAMESPACE);
-    let client = DuckDBReader::new(&db_path)?;
+    let uri = SETTINGS.lance_uri_for(HN_NAMESPACE);
+    let reader = LanceReader::open(&uri).await?;
 
-    println!("--- DuckDB: top_stories 履歴一覧 (namespace=hn) ---");
-    let stories = client.fetch_all_stories()?;
+    println!("--- Lance: top_stories 履歴一覧 (namespace=hn, uri={uri}) ---");
+    let stories = reader.fetch_all_top_stories().await?;
 
     for (fetched_at, item_ids) in stories {
         println!(

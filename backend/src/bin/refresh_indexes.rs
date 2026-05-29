@@ -1,19 +1,19 @@
-//! 指定 namespace の DuckDB ファイルで FTS + HNSW を再構築。
+//! 指定 namespace の Lance dataset に FTS + Vector index を構築 (冪等)。
 //!
 //! ```
 //! cargo run --bin refresh_indexes -- hn
 //! cargo run --bin refresh_indexes -- smoke
 //! ```
 //!
-//! 主な用途:
-//! - main pipeline と独立して再構築したい時 (例: 別 cron, 手動 ad-hoc)
-//! - pipeline がエラーで refresh まで届かなかった時のリカバリ
-//! - 検索動作確認の前段
+//! Lance は append 時に index を自動更新するので、通常運用ではこの bin を
+//! 別途叩く必要はない (main pipeline 末尾で `LanceStore::ensure_indexes` が走る)。
+//! Vector index (IvfPq) は学習に最低 ~256 行必要なので、データが少ない初期段階では
+//! `create_index` が失敗することがあるが、その場合は warn 留めで先に進む。
 
 use anyhow::{Context, Result};
 use tracing_subscriber::EnvFilter;
-use wastest::DuckDBWriter;
 use wastest::config::SETTINGS;
+use wastest::lance::LanceStore;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,10 +27,11 @@ async fn main() -> Result<()> {
     let namespace = std::env::args()
         .nth(1)
         .context("usage: refresh_indexes <namespace>")?;
-    let db_path = SETTINGS.duckdb_path_for(&namespace);
+    let uri = SETTINGS.lance_uri_for(&namespace);
 
-    let writer = DuckDBWriter::new(&db_path)?;
-    writer.refresh_search_indexes()?;
-    println!("search indexes (FTS + HNSW) refreshed for namespace={namespace}");
+    let store = LanceStore::open(&uri).await?;
+    store.ensure_indexes().await?;
+    store.optimize_indexes().await?;
+    println!("indexes ensured & optimized for namespace={namespace} (uri={uri})");
     Ok(())
 }

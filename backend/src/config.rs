@@ -5,9 +5,10 @@ use std::sync::LazyLock;
 #[derive(Debug, Deserialize)]
 pub struct Settings {
     pub database_url: String,
-    /// namespace ごとに DuckDB ファイルを置くディレクトリ。
-    /// 各 namespace の物理パスは `{duckdb_dir}/{namespace}.duckdb`。
-    pub duckdb_dir: String,
+    /// namespace ごとに Lance dataset ディレクトリ群を置く親ディレクトリ。
+    /// 各 namespace のレイアウトは
+    /// `{lance_dir}/{namespace}/{contents,statements,code_blocks}.lance/`。
+    pub lance_dir: String,
     pub openai_api_key: SecretString,
     pub gemini_api_key: SecretString,
     pub s3_bucket_id: String,
@@ -21,9 +22,10 @@ impl Settings {
         Ok(envy::from_env()?)
     }
 
-    /// 指定 namespace の DuckDB ファイルパスを返す。
-    pub fn duckdb_path_for(&self, namespace: &str) -> String {
-        format!("{}/{}.duckdb", self.duckdb_dir, namespace)
+    /// 指定 namespace の Lance dataset 親ディレクトリ (lancedb::connect の uri)。
+    /// この下に `contents.lance/`, `statements.lance/`, `code_blocks.lance/` が並ぶ。
+    pub fn lance_uri_for(&self, namespace: &str) -> String {
+        format!("{}/{}", self.lance_dir, namespace)
     }
 }
 
