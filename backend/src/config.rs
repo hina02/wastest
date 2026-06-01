@@ -2,6 +2,10 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use std::sync::LazyLock;
 
+fn default_s3_region() -> String {
+    "ap-northeast-1".to_string()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Settings {
     pub database_url: String,
@@ -14,6 +18,8 @@ pub struct Settings {
     pub s3_bucket_id: String,
     pub s3_access_key: SecretString,
     pub s3_secret_key: SecretString,
+    #[serde(default = "default_s3_region")]
+    pub s3_region: String,
 }
 
 impl Settings {
@@ -26,6 +32,11 @@ impl Settings {
     /// この下に `contents.lance/`, `statements.lance/`, `code_blocks.lance/` が並ぶ。
     pub fn lance_uri_for(&self, namespace: &str) -> String {
         format!("{}/{}", self.lance_dir, namespace)
+    }
+
+    /// S3 上の指定 namespace の Lance dataset URI。
+    pub fn s3_lance_uri_for(&self, namespace: &str) -> String {
+        format!("s3://{}/{}", self.s3_bucket_id, namespace)
     }
 }
 
