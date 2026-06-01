@@ -41,9 +41,10 @@ pub async fn create_many(pool: &SqlitePool, items: &[CreateHNItem]) -> Result<()
     Ok(())
 }
 
+// 直近90日以内はlocalを読み、それ以降はS3を読む
 pub async fn delete_old_items(pool: &SqlitePool) -> Result<u64> {
     let now = Utc::now();
-    let seven_days_ago = now - chrono::Duration::days(7);
+    let seven_days_ago = now - chrono::Duration::days(90);
     let threshold_time = seven_days_ago.timestamp();
 
     let result = sqlx::query!("DELETE FROM hn_items WHERE time <= ?", threshold_time)

@@ -15,8 +15,26 @@ use futures::TryStreamExt;
 use lance_index::scalar::FullTextSearchQuery;
 use lancedb::DistanceType;
 use lancedb::query::{ExecutableQuery, QueryBase, QueryExecutionOptions};
+use lancedb::rerankers::rrf::RRFReranker;
 use lancedb::{Connection as LanceConnection, Table};
+use std::sync::Arc;
 use uuid::Uuid;
+
+// ----------------------------------------------------------------
+// 検索パラメータ
+// ----------------------------------------------------------------
+
+/// VSS の cosine similarity cutoff。これ未満は捨てる。
+/// Gemini embedding でのチューニング値 (経験則)。
+pub const VSS_SIM_CUTOFF: f32 = 0.45;
+
+/// Hybrid 用: FTS `_score` がこれ以下なら「FTS が実質マッチしていない」とみなす。
+/// VSS 寄与も無ければ hit ごと捨てる。
+pub const FTS_SCORE_MIN: f32 = 0.0;
+
+/// RRF reranker の k 定数。元論文 (Cormack 2009) で k=60 が near-optimal。
+/// 将来的にColbert採用
+pub const RRF_K: f32 = 60.0;
 
 // ----------------------------------------------------------------
 // 検索ヒット型 (lancedb が返す `_score` / `_distance` / `_relevance_score` を保持)
@@ -68,15 +86,30 @@ pub struct LanceReader {
 
 impl LanceReader {
     /// `lance_uri = {lance_dir}/{namespace}` を渡す。
+    /// env の `DATABASE_URL` が指す SQLite ファイルが存在すれば `hn` schema として ATTACH する
+    /// (HN namespace で `hn.hn_items` ⨝ `contents.lance` を 1 つの DuckDB SQL で書けるように)。
     pub async fn open(uri: &str) -> Result<Self> {
         let lance_db = lancedb::connect(uri).execute().await?;
         let duck = DuckConnection::open_in_memory()?;
         duck.execute_batch("INSTALL lance; LOAD lance;")?;
+        if let Err(e) = maybe_attach_hn_sqlite(&duck) {
+            tracing::warn!(error = %e, "skip ATTACH hn sqlite");
+        }
         Ok(Self {
             uri: uri.to_string(),
             lance_db,
             duck,
         })
+    }
+
+    /// HN namespace 用: `hn.hn_items` と `contents.lance` を id (= HN item_id) で JOIN した行数。
+    /// ATTACH 失敗 / 非 HN namespace のときは Err。
+    pub fn count_hn_with_content(&self) -> Result<i64> {
+        let path = self.contents_path();
+        let sql = format!(
+            "SELECT COUNT(*) FROM hn.hn_items h JOIN '{path}' c ON h.id = c.id"
+        );
+        self.scalar_i64(&sql).with_context(|| "JOIN hn_items × contents")
     }
 
     pub fn uri(&self) -> &str {
@@ -169,6 +202,7 @@ impl LanceReader {
     }
 
     /// statements.embedding に対する VSS (最近傍) 検索 (cosine)。
+    /// `VSS_SIM_CUTOFF` 未満の hit は捨てる。
     pub async fn search_vss(&self, query_vec: Vec<f32>, limit: usize) -> Result<Vec<VssHit>> {
         let tbl = self.statements_table().await?;
         let mut stream = tbl
@@ -187,12 +221,16 @@ impl LanceReader {
             let kws = b.column_by_name("keywords").cloned();
             for i in 0..b.num_rows() {
                 let d = dists.as_ref().map(|s| s.value(i)).unwrap_or(f32::NAN);
+                let sim = 1.0 - d;
+                if sim < VSS_SIM_CUTOFF {
+                    continue;
+                }
                 hits.push(VssHit {
                     statement_id: parse_uuid(ids.value(i)),
                     content_id: cids.value(i),
                     statement: stmts.value(i).to_string(),
                     keywords: keywords_at(&kws, i),
-                    similarity: 1.0 - d,
+                    similarity: sim,
                 });
             }
         }
@@ -212,6 +250,7 @@ impl LanceReader {
             .full_text_search(FullTextSearchQuery::new(query_text.to_owned()))
             .nearest_to(query_vec)?
             .distance_type(DistanceType::Cosine)
+            .rerank(Arc::new(RRFReranker::new(RRF_K)))
             .limit(limit)
             .execute_hybrid(QueryExecutionOptions::default())
             .await?;
@@ -236,6 +275,10 @@ impl LanceReader {
                 });
             }
         }
+        // 「VSS hit 有り」or「FTS が実質マッチ」のいずれかを満たすものだけ keep
+        hits.retain(|h| {
+            h.vss_similarity.is_some() || h.fts_score.map_or(false, |s| s > FTS_SCORE_MIN)
+        });
         Ok(hits)
     }
 }
@@ -296,4 +339,20 @@ fn extract_string_list(la: &ListArray, row: usize) -> Vec<String> {
 
 fn parse_uuid(s: &str) -> Uuid {
     Uuid::parse_str(s).unwrap_or_else(|_| Uuid::nil())
+}
+
+/// best-effort: env の DATABASE_URL が指す SQLite ファイルが存在すれば DuckDB に ATTACH する。
+/// 失敗ケース (env 無し / ファイル無し / 拡張ロード失敗) は呼び出し側で warn 留めにする。
+fn maybe_attach_hn_sqlite(duck: &DuckConnection) -> Result<()> {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return Ok(());
+    };
+    let path = url.strip_prefix("sqlite://").unwrap_or(&url);
+    if !std::path::Path::new(path).exists() {
+        return Ok(());
+    }
+    duck.execute_batch(&format!(
+        "INSTALL sqlite; LOAD sqlite; ATTACH '{path}' AS hn (TYPE sqlite);"
+    ))?;
+    Ok(())
 }

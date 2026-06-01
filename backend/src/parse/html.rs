@@ -607,14 +607,23 @@ fn resolve_url(base: &str, href: &str) -> String {
 }
 
 /// テキスト/href の空判定と、除外パターン・除外ドメイン・ページ内リンクを弾くフィルタ。
+///
+/// IGNORE_DOMAINS は hostname の完全一致で判定する。部分文字列マッチだと
+/// "sidefx.com" が "x.com" に引っかかるなど誤検知が起きるため。
 fn is_valid_link(link: &Link) -> bool {
     let lower = link.href.to_lowercase();
     let trimmed = link.text.trim();
-    !trimmed.is_empty()
-        && !link.href.is_empty()
-        && !IGNORE_HREF_PATTERNS.iter().any(|p| lower.contains(p))
-        && !IGNORE_DOMAINS.iter().any(|d| lower.contains(d))
-        && !link.href.starts_with('#')
+    if trimmed.is_empty() || link.href.is_empty() || link.href.starts_with('#') {
+        return false;
+    }
+    if IGNORE_HREF_PATTERNS.iter().any(|p| lower.contains(p)) {
+        return false;
+    }
+    let host = Url::parse(&link.href)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
+        .unwrap_or_default();
+    !IGNORE_DOMAINS.contains(host.as_str())
 }
 
 /// `<a>` を全走査し、絶対URL化・フィルタ・重複排除した結果を返す。
@@ -684,7 +693,46 @@ fn extract_code_blocks(root: &Node) -> Vec<String> {
 }
 
 // ----------------------------------------------------------------
-// 7. メイン
+// 7. クロール用リンク抽出 (CETD なし、nav/aside 含む全 <a> 対象)
+// ----------------------------------------------------------------
+
+static A_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("a[href]").expect("valid selector"));
+
+/// CETD スコアリングを行わず DOM 全体の `<a href>` を走査してリンクを返す。
+///
+/// `parse_html` の `links` は本文ノード限定で `<nav>`/`<aside>` を除外するため、
+/// インデックス・サイドバー主体のドキュメントページではリンクが取れない。
+/// クローラ用途ではこちらを使う。
+pub fn extract_all_links(html_body: &str, url: &str) -> Vec<Link> {
+    let document = Html::parse_document(html_body);
+    let mut links: Vec<Link> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for el in document.select(&A_SEL) {
+        let raw_href = match el.value().attr("href") {
+            Some(h) if !h.is_empty() && !h.starts_with('#') => h,
+            _ => continue,
+        };
+        let text: String = el
+            .text()
+            .collect::<String>()
+            .replace('\u{200B}', "");
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        let abs = resolve_url(url, raw_href);
+        let link = Link { text, href: abs };
+        if is_valid_link(&link) && seen.insert(link.href.clone()) {
+            links.push(link);
+        }
+    }
+    links
+}
+
+// ----------------------------------------------------------------
+// 8. メイン
 // ----------------------------------------------------------------
 
 /// `<title>` 要素のテキストを取り出す。無い・空なら `None`。
@@ -752,3 +800,4 @@ pub fn parse_html(html_body: &str, url: &str) -> ParsedHtml {
         is_spa,
     }
 }
+
