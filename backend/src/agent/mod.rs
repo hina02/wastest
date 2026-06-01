@@ -3,6 +3,7 @@
 pub mod gemini;
 pub mod openai;
 pub mod prompts;
+pub mod search_tools;
 
 use anyhow::Result;
 use serde::Deserialize;
