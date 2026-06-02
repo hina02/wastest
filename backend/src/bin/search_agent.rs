@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
     let agent = gemini_client
         .agent(CHAT_MODEL)
         .preamble(PREAMBLE)
+        .additional_params(serde_json::json!({ "generationConfig": {} }))
         .tool(search_tool)
         .tool(content_tool)
         .build();

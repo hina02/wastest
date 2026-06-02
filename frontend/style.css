@@ -1,5 +1,189 @@
-@import "tailwindcss";
+*, *::before, *::after { box-sizing: border-box; }
 
-@theme {
-  --font-sans: "Inter", "Noto Sans JP", sans-serif;
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+  font-size: 14px;
+  background: #f5f5f5;
+  color: #111;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  background: #1a1a2e;
+  color: #fff;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+nav { display: flex; gap: 0.25rem; }
+
+.tab-btn {
+  padding: 0.3rem 0.8rem;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: transparent;
+  color: #ccc;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.tab-btn.active {
+  background: #e94560;
+  border-color: #e94560;
+  color: #fff;
+}
+
+.tab-pane {
+  display: none;
+  padding: 1rem;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.tab-pane.active { display: block; }
+
+.form-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+input[type="text"], input:not([type]), input[type="number"], select, textarea {
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  background: #fff;
+}
+
+input.grow, textarea { flex: 1; width: 100%; }
+
+textarea {
+  width: 100%;
+  font-family: monospace;
+  resize: vertical;
+  margin-bottom: 0.5rem;
+}
+
+button {
+  padding: 0.35rem 0.8rem;
+  border: none;
+  border-radius: 4px;
+  background: #e94560;
+  color: #fff;
+  cursor: pointer;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+button:disabled {
+  background: #aaa;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: #555;
+}
+
+.status {
+  min-height: 1.2rem;
+  font-size: 0.85rem;
+  color: #555;
+  margin-bottom: 0.5rem;
+}
+
+.status.error { color: #c0392b; }
+.status.ok    { color: #27ae60; }
+
+.results {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.results li {
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 0.6rem 0.8rem;
+  margin-bottom: 0.4rem;
+}
+
+.hit-score {
+  float: right;
+  font-size: 0.8rem;
+  color: #888;
+  font-family: monospace;
+}
+
+.hit-keywords {
+  font-size: 0.78rem;
+  color: #777;
+  margin-top: 0.2rem;
+}
+
+/* Chat */
+#chat-history {
+  min-height: 200px;
+  max-height: 500px;
+  overflow-y: auto;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 0.5rem;
+  background: #fff;
+  margin-bottom: 0.5rem;
+}
+
+.chat-msg {
+  margin-bottom: 0.6rem;
+  line-height: 1.5;
+}
+
+.chat-msg .role {
+  font-weight: 600;
+  font-size: 0.8rem;
+  color: #888;
+  margin-bottom: 0.1rem;
+}
+
+.chat-msg.user .role  { color: #1a73e8; }
+.chat-msg.assistant .role { color: #e94560; }
+.chat-msg .body { white-space: pre-wrap; }
+
+.chat-input-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* Standalone status colors (HTMX swap targets) */
+.ok    { color: #27ae60; }
+.error { color: #c0392b; }
+
+/* HTMX loading indicator */
+.htmx-indicator { display: none; font-size: 0.85rem; color: #888; }
+.htmx-indicator.htmx-request { display: inline; }
+
+/* Admin */
+.admin-section {
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 0.8rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.admin-section h2 {
+  margin: 0 0 0.6rem;
+  font-size: 0.95rem;
+  font-weight: 600;
 }

@@ -117,12 +117,11 @@ impl<L: LlmProvider> HybridSearchTool<L> {
             .map(|x| x as f32)
             .collect();
 
-        let tbl = self
-            .lance_db
-            .open_table(statements::TBL)
-            .execute()
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let tbl = match self.lance_db.open_table(statements::TBL).execute().await {
+            Ok(t) => t,
+            Err(e) if e.to_string().contains("was not found") => return Ok(vec![]),
+            Err(e) => return Err(anyhow::anyhow!(e)),
+        };
 
         let mut stream = tbl
             .query()
@@ -238,12 +237,13 @@ impl GetContentTool {
             .with_context(|| format!("invalid statement_id: {}", args.statement_id))?;
 
         // statements テーブルから content_id を引く
-        let tbl = self
-            .lance_db
-            .open_table(statements::TBL)
-            .execute()
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let tbl = match self.lance_db.open_table(statements::TBL).execute().await {
+            Ok(t) => t,
+            Err(e) if e.to_string().contains("was not found") => {
+                anyhow::bail!("statements table not found (data not ingested yet)")
+            }
+            Err(e) => return Err(anyhow::anyhow!(e)),
+        };
 
         let mut stream = tbl
             .query()

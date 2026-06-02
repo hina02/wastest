@@ -14,5 +14,5 @@ pub mod reader;
 pub mod store;
 pub mod tables;
 
-pub use reader::{FtsHit, HybridHit, LanceReader, VssHit};
+pub use reader::{FtsHit, HybridHit, LanceReader, LanceSearcher, VssHit};
 pub use store::{IVF_PQ_MIN_ROWS, LanceStore};

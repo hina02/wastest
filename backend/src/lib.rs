@@ -10,7 +10,7 @@ pub use agent::LlmProvider;
 pub use agent::gemini::GeminiClient;
 pub use agent::openai::OpenAIClient;
 pub use api::hn::{CrawlerState, run_hn_pipeline};
-pub use lance::{FtsHit, HybridHit, LanceReader, LanceStore, VssHit};
+pub use lance::{FtsHit, HybridHit, LanceReader, LanceSearcher, LanceStore, VssHit};
 pub use pipeline::run_pipeline_with_urls;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 

@@ -1,18 +1,137 @@
 <!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Pumice</title>
-    <link rel="stylesheet" href="/style.css" />
-    <link
-      rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap"
-    />
-  </head>
-  <body class="mt-16 m-0 min-w-[320px] min-h-screen max-w-2xl mx-auto">
-    <div id="root"></div>
-    <script type="module" src="/src/index.tsx"></script>
-  </body>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>wastest</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>wastest</h1>
+    <nav>
+      <button class="tab-btn active" data-tab="search">Search</button>
+      <button class="tab-btn" data-tab="chat">Chat</button>
+      <button class="tab-btn" data-tab="admin">Admin</button>
+    </nav>
+  </header>
+
+  <!-- Search tab -->
+  <div id="tab-search" class="tab-pane active">
+    <form hx-get="/api/search" hx-target="#search-results" hx-swap="innerHTML"
+          hx-indicator="#search-loading">
+      <div class="form-row">
+        <select name="namespace" class="ns-select"></select>
+        <select name="type">
+          <option value="hybrid">Hybrid</option>
+          <option value="fts">FTS</option>
+          <option value="vss">VSS</option>
+        </select>
+        <input name="q" placeholder="query" class="grow" required>
+        <input name="limit" type="number" value="5" min="1" max="50">
+        <button type="submit">Search</button>
+        <span id="search-loading" class="htmx-indicator">検索中...</span>
+      </div>
+    </form>
+    <ul id="search-results" class="results"></ul>
+  </div>
+
+  <!-- Chat tab -->
+  <div id="tab-chat" class="tab-pane">
+    <form id="chat-meta" class="form-row">
+      <select name="namespace" class="ns-select"></select>
+      <input name="session_id" id="chat-session" value="default" placeholder="session ID">
+      <button type="button" class="btn-secondary"
+              hx-post="/api/chat/clear"
+              hx-include="#chat-meta"
+              hx-target="#chat-history"
+              hx-swap="innerHTML">Clear</button>
+    </form>
+    <div id="chat-history"></div>
+    <form hx-post="/api/chat"
+          hx-include="#chat-meta"
+          hx-target="#chat-history"
+          hx-swap="beforeend"
+          hx-indicator="#chat-loading"
+          hx-on::after-request="this.reset()">
+      <div class="chat-input-row">
+        <input name="message" placeholder="メッセージを入力..." class="grow" required>
+        <button type="submit">Send</button>
+        <span id="chat-loading" class="htmx-indicator">応答中...</span>
+      </div>
+    </form>
+  </div>
+
+  <!-- Admin tab -->
+  <div id="tab-admin" class="tab-pane">
+    <section class="admin-section">
+      <h2>Ingest URLs</h2>
+      <form hx-post="/api/ingest" hx-target="#ingest-status" hx-swap="innerHTML"
+            hx-indicator="#ingest-loading">
+        <div class="form-row">
+          <select name="namespace" class="ns-select"></select>
+          <span id="ingest-loading" class="htmx-indicator">処理中...</span>
+        </div>
+        <textarea name="urls" placeholder="URLs (1行1つ)" rows="4"></textarea>
+        <button type="submit">Ingest</button>
+        <div id="ingest-status" class="status"></div>
+      </form>
+    </section>
+
+    <section class="admin-section">
+      <h2>Crawl Links</h2>
+      <form hx-post="/api/crawl" hx-target="#crawl-results" hx-swap="innerHTML"
+            hx-indicator="#crawl-loading">
+        <div class="form-row">
+          <input name="depth" type="number" value="2" min="1" max="5" placeholder="depth">
+          <span id="crawl-loading" class="htmx-indicator">クロール中...</span>
+        </div>
+        <textarea name="seeds" placeholder="Seed URLs (1行1つ)" rows="3"></textarea>
+        <button type="submit">Crawl</button>
+      </form>
+      <ul id="crawl-results" class="results"></ul>
+    </section>
+
+    <section class="admin-section">
+      <h2>Refresh Indexes</h2>
+      <form hx-post="/api/refresh" hx-target="#refresh-status" hx-swap="innerHTML">
+        <div class="form-row">
+          <select name="namespace" class="ns-select"></select>
+          <button type="submit">Refresh</button>
+        </div>
+        <div id="refresh-status" class="status"></div>
+      </form>
+    </section>
+
+    <section class="admin-section">
+      <h2>Top Stories</h2>
+      <div class="form-row">
+        <select name="namespace" id="stories-namespace" class="ns-select"></select>
+        <button hx-get="/api/top-stories"
+                hx-include="#stories-namespace"
+                hx-target="#stories-results"
+                hx-swap="innerHTML">List</button>
+      </div>
+      <ul id="stories-results" class="results"></ul>
+    </section>
+  </div>
+
+  <script>
+    // タブ切り替え
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.onclick = () => {
+        document.querySelectorAll('.tab-btn, .tab-pane').forEach(el => el.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+      };
+    });
+    // namespace セレクト一括ロード
+    fetch('/api/namespaces').then(r => r.json()).then(ns => {
+      document.querySelectorAll('.ns-select').forEach(sel => {
+        sel.innerHTML = ns.map(n => `<option value="${n}">${n}</option>`).join('');
+      });
+    });
+  </script>
+</body>
 </html>

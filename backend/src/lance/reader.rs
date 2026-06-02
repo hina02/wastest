@@ -156,7 +156,11 @@ impl LanceReader {
 
     /// top_stories 全履歴を fetched_at 降順で返す。 (HN namespace のみ）
     pub async fn fetch_all_top_stories(&self) -> Result<Vec<(String, Vec<i64>)>> {
-        let tbl = self.lance_db.open_table(top_stories::TBL).execute().await?;
+        let tbl = match self.lance_db.open_table(top_stories::TBL).execute().await {
+            Ok(t) => t,
+            Err(e) if e.to_string().contains("was not found") => return Ok(vec![]),
+            Err(e) => return Err(e.into()),
+        };
         let mut stream = tbl.query().execute().await?;
         let mut rows = Vec::new();
         while let Some(batch) = stream.try_next().await? {
@@ -237,7 +241,6 @@ impl LanceReader {
         Ok(hits)
     }
 
-    /// FTS + VSS のハイブリッド検索 (lancedb の `execute_hybrid`)。
     pub async fn search_hybrid(
         &self,
         query_text: &str,
@@ -279,6 +282,155 @@ impl LanceReader {
         hits.retain(|h| {
             h.vss_similarity.is_some() || h.fts_score.map_or(false, |s| s > FTS_SCORE_MIN)
         });
+        Ok(hits)
+    }
+}
+
+// ----------------------------------------------------------------
+// LanceSearcher: lancedb のみ使う Sync な検索専用ビュー
+// ----------------------------------------------------------------
+
+/// `LanceReader` と異なり DuckDB 接続を持たないため `Send + Sync`。
+/// Axum ハンドラなど `Send` が要求される文脈で使用する。
+pub struct LanceSearcher {
+    lance_db: LanceConnection,
+}
+
+impl LanceSearcher {
+    pub async fn open(uri: &str) -> Result<Self> {
+        let lance_db = lancedb::connect(uri).execute().await?;
+        Ok(Self { lance_db })
+    }
+
+    async fn open_table_opt(&self, name: &str) -> Result<Option<Table>> {
+        match self.lance_db.open_table(name).execute().await {
+            Ok(t) => Ok(Some(t)),
+            Err(e) if e.to_string().contains("was not found") => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn statements_table(&self) -> Result<Option<Table>> {
+        self.open_table_opt(statements::TBL).await
+    }
+
+    pub async fn fetch_all_top_stories(&self) -> Result<Vec<(String, Vec<i64>)>> {
+        let tbl = match self.lance_db.open_table(top_stories::TBL).execute().await {
+            Ok(t) => t,
+            Err(e) if e.to_string().contains("was not found") => return Ok(vec![]),
+            Err(e) => return Err(e.into()),
+        };
+        let mut stream = tbl.query().execute().await?;
+        let mut rows = Vec::new();
+        while let Some(batch) = stream.try_next().await? {
+            rows.extend(top_stories::extract_rows(&batch)?);
+        }
+        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(rows)
+    }
+
+    pub async fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<FtsHit>> {
+        let Some(tbl) = self.statements_table().await? else { return Ok(vec![]); };
+        let mut stream = tbl
+            .query()
+            .full_text_search(FullTextSearchQuery::new(query.to_owned()))
+            .limit(limit)
+            .execute()
+            .await?;
+        let mut hits = Vec::new();
+        while let Some(b) = stream.try_next().await? {
+            let ids = downcast_str(&b, "id")?;
+            let cids = downcast_i64(&b, "content_id")?;
+            let stmts = downcast_str(&b, "statement")?;
+            let scores = downcast_f32_opt(&b, "_score");
+            let kws = b.column_by_name("keywords").cloned();
+            for i in 0..b.num_rows() {
+                hits.push(FtsHit {
+                    statement_id: parse_uuid(ids.value(i)),
+                    content_id: cids.value(i),
+                    statement: stmts.value(i).to_string(),
+                    keywords: keywords_at(&kws, i),
+                    score: scores.as_ref().map(|s| s.value(i)).unwrap_or(f32::NAN),
+                });
+            }
+        }
+        Ok(hits)
+    }
+
+    pub async fn search_vss(&self, query_vec: Vec<f32>, limit: usize) -> Result<Vec<VssHit>> {
+        let Some(tbl) = self.statements_table().await? else { return Ok(vec![]); };
+        let mut stream = tbl
+            .query()
+            .nearest_to(query_vec)?
+            .distance_type(DistanceType::Cosine)
+            .limit(limit)
+            .execute()
+            .await?;
+        let mut hits = Vec::new();
+        while let Some(b) = stream.try_next().await? {
+            let ids = downcast_str(&b, "id")?;
+            let cids = downcast_i64(&b, "content_id")?;
+            let stmts = downcast_str(&b, "statement")?;
+            let dists = downcast_f32_opt(&b, "_distance");
+            let kws = b.column_by_name("keywords").cloned();
+            for i in 0..b.num_rows() {
+                let d = dists.as_ref().map(|s| s.value(i)).unwrap_or(f32::NAN);
+                let sim = 1.0 - d;
+                if sim < VSS_SIM_CUTOFF {
+                    continue;
+                }
+                hits.push(VssHit {
+                    statement_id: parse_uuid(ids.value(i)),
+                    content_id: cids.value(i),
+                    statement: stmts.value(i).to_string(),
+                    keywords: keywords_at(&kws, i),
+                    similarity: sim,
+                });
+            }
+        }
+        Ok(hits)
+    }
+
+    pub async fn search_hybrid(
+        &self,
+        query_text: &str,
+        query_vec: Vec<f32>,
+        limit: usize,
+    ) -> Result<Vec<HybridHit>> {
+        let Some(tbl) = self.statements_table().await? else { return Ok(vec![]); };
+        let mut stream = tbl
+            .query()
+            .full_text_search(FullTextSearchQuery::new(query_text.to_owned()))
+            .nearest_to(query_vec)?
+            .distance_type(DistanceType::Cosine)
+            .rerank(Arc::new(RRFReranker::new(RRF_K)))
+            .limit(limit)
+            .execute_hybrid(QueryExecutionOptions::default())
+            .await?;
+        let mut hits = Vec::new();
+        while let Some(b) = stream.try_next().await? {
+            let ids = downcast_str(&b, "id")?;
+            let cids = downcast_i64(&b, "content_id")?;
+            let stmts = downcast_str(&b, "statement")?;
+            let kws = b.column_by_name("keywords").cloned();
+            let relevance = downcast_f32_opt(&b, "_relevance_score");
+            let fts_scores = downcast_f32_opt(&b, "_score");
+            let vss_dists = downcast_f32_opt(&b, "_distance");
+            for i in 0..b.num_rows() {
+                let h = HybridHit {
+                    statement_id: parse_uuid(ids.value(i)),
+                    content_id: cids.value(i),
+                    statement: stmts.value(i).to_string(),
+                    keywords: keywords_at(&kws, i),
+                    relevance_score: relevance.as_ref().map(|s| s.value(i)).unwrap_or(f32::NAN),
+                    fts_score: fts_scores.as_ref().map(|s| s.value(i)),
+                    vss_similarity: vss_dists.as_ref().map(|s| 1.0 - s.value(i)),
+                };
+                if h.vss_similarity.is_some() || h.fts_score.map_or(false, |s| s > FTS_SCORE_MIN) {
+                    hits.push(h);
+                }
+            }
+        }
         Ok(hits)
     }
 }
