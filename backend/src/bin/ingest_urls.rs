@@ -1,4 +1,4 @@
-//! 汎用 ingest: 指定 namespace の Lance dataset 群に任意 URL 列を取り込む。
+//! 汎用 ingest: 指定 namespace の url_events テーブルに URL を登録する。
 //!
 //! ```
 //! cargo run --bin ingest_urls -- <namespace> <url> [url ...]
@@ -7,15 +7,14 @@
 //!   https://example.com/article2
 //! ```
 //!
-//! 終了後は `cargo run --bin refresh_indexes -- <namespace>` で FTS/HNSW を初期化。
+//! URL を pending として登録するだけで、実際の処理は `process_events` が行う。
+//! 既に登録済みの URL はスキップされる (INSERT OR IGNORE)。
 
 use anyhow::{Context, Result};
-use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use wastest::config::SETTINGS;
-use wastest::lance::LanceStore;
-use wastest::pipeline::run_pipeline_with_urls;
-use wastest::GeminiClient;
+use wastest::connect;
+use wastest::db::events::{UrlEvent, enqueue_many};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,41 +34,22 @@ async fn main() -> Result<()> {
         anyhow::bail!("at least one URL is required");
     }
 
-    let uri = SETTINGS.lance_uri_for(&namespace);
-    let store = Arc::new(LanceStore::open(&uri).await?);
-    let existing = store.existing_content_ids().await?;
+    let pool = connect(&SETTINGS.database_url).await?;
+    let sqlite_ddl = include_str!("../../../ddl/sqlite.sql");
+    sqlx::raw_sql(sqlite_ddl).execute(&pool).await?;
 
-    let urls: Vec<(i64, String)> = urls_raw
+    let events: Vec<UrlEvent> = urls_raw
         .into_iter()
-        .map(|u| (id_from_url(&u), u))
-        .filter(|(id, url)| {
-            if existing.contains(id) {
-                println!("skip (already ingested): [{id}] {url}");
-                false
-            } else {
-                true
-            }
+        .map(|url| {
+            let id = id_from_url(&url);
+            UrlEvent { id, url, namespace: namespace.clone() }
         })
         .collect();
 
-    if urls.is_empty() {
-        println!("nothing to ingest");
-        return Ok(());
-    }
-
-    println!(
-        "--- ingesting {} URL(s) into namespace={namespace} (uri={uri}) ---",
-        urls.len()
-    );
-    for (id, url) in &urls {
-        println!("  [{id}] {url}");
-    }
-
-    let client = Arc::new(GeminiClient::new().await?);
-    run_pipeline_with_urls(urls, client, store).await?;
-    println!(
-        "done. run `cargo run --bin refresh_indexes -- {namespace}` to (re)build FTS/Vector indexes."
-    );
+    let count = events.len();
+    enqueue_many(&pool, &events).await?;
+    println!("enqueued {count} URL(s) into namespace={namespace}");
+    println!("run `cargo run --bin process_events -- {namespace}` to process.");
     Ok(())
 }
 

@@ -17,13 +17,8 @@ use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
 use url::Url;
 use wastest::{
-    GeminiClient, LanceSearcher, LlmProvider,
-    api::parse::fetch_html,
-    config::SETTINGS,
-    connect,
-    lance::LanceStore,
-    parse::html::extract_all_links,
-    pipeline::run_pipeline_with_urls,
+    GeminiClient, LanceSearcher, LlmProvider, api::parse::fetch_html, config::SETTINGS, connect,
+    lance::LanceStore, parse::html::extract_all_links, pipeline::run_pipeline_with_urls,
 };
 
 // ----------------------------------------------------------------
@@ -41,7 +36,11 @@ struct AppError(anyhow::Error);
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         // 200 OK + HTML で返す → HTMX がターゲットにスワップできる
-        Html(format!("<span class='error'>{}</span>", esc(&self.0.to_string()))).into_response()
+        Html(format!(
+            "<span class='error'>{}</span>",
+            esc(&self.0.to_string())
+        ))
+        .into_response()
     }
 }
 impl<E: Into<anyhow::Error>> From<E> for AppError {
@@ -52,7 +51,9 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
 type HtmlResp = Result<Html<String>, AppError>;
 
 fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn ok_span(msg: &str) -> Html<String> {
@@ -103,7 +104,9 @@ async fn search(State(s): State<AppState>, Query(p): Query<SearchParams>) -> Htm
         "fts" => {
             let hits = reader.search_fts(&p.q, p.limit).await?;
             Ok(hits_html(
-                hits.into_iter().map(|h| (h.statement, h.keywords, h.score)).collect(),
+                hits.into_iter()
+                    .map(|h| (h.statement, h.keywords, h.score))
+                    .collect(),
             ))
         }
         "vss" => {
@@ -117,7 +120,9 @@ async fn search(State(s): State<AppState>, Query(p): Query<SearchParams>) -> Htm
                 .collect();
             let hits = reader.search_vss(q_vec, p.limit).await?;
             Ok(hits_html(
-                hits.into_iter().map(|h| (h.statement, h.keywords, h.similarity)).collect(),
+                hits.into_iter()
+                    .map(|h| (h.statement, h.keywords, h.similarity))
+                    .collect(),
             ))
         }
         _ => {
@@ -243,7 +248,10 @@ async fn ingest(State(s): State<AppState>, Form(req): Form<IngestForm>) -> HtmlR
     if !urls.is_empty() {
         run_pipeline_with_urls(urls, Arc::clone(&s.llm), store).await?;
     }
-    Ok(ok_span(&format!("ingested {ingested}, skipped {}", total - ingested)))
+    Ok(ok_span(&format!(
+        "ingested {ingested}, skipped {}",
+        total - ingested
+    )))
 }
 
 // ----------------------------------------------------------------
@@ -371,6 +379,7 @@ fn default_hn() -> String {
     "hn".to_string()
 }
 
+// Fixme no need namespace here
 async fn top_stories(Query(p): Query<TopStoriesParams>) -> HtmlResp {
     let reader = LanceSearcher::open(&SETTINGS.lance_uri_for(&p.namespace)).await?;
     let stories = reader.fetch_all_top_stories().await?;

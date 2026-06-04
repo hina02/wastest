@@ -3,4 +3,5 @@
 //! Lance フォーマット側は [`crate::lance`] を参照。
 
 pub mod chat;
+pub mod events;
 pub mod hn;

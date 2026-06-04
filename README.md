@@ -32,28 +32,42 @@ Hacker News (および任意 URL) を入力に、LLM で「ステートメント
                 │
    ┌────────────┴─────────────┐
    ▼                          ▼
-┌──────────────┐     ┌─────────────────────────────────────┐
-│   SQLite     │     │  Lance datasets (per namespace)      │
-│  hn_items    │     │  {lance_dir}/{ns}/                   │
-│  (HN メタのみ) │     │   ├─ contents.lance                  │
-└──────────────┘     │   ├─ statements.lance (FTS + IvfPq)  │
+┌──────────────────┐  ┌─────────────────────────────────────┐
+│   SQLite         │  │  Lance datasets (per namespace)      │
+│  hn_items        │  │  {lance_dir}/{ns}/                   │
+│  url_events      │  │   ├─ contents.lance                  │
+│  (状態管理・WQ)   │  │   ├─ statements.lance (FTS + IvfPq)  │
                      │   ├─ code_blocks.lance               │
                      │   └─ top_stories.lance (HN namespace) │
                      └─────────────┬───────────────────────┘
                                    │
-                ┌──────────────────┴──────────────────┐
-                ▼                                     ▼
-       ┌───────────────────┐                ┌─────────────────────┐
-       │  lancedb (native) │                │  DuckDB on Lance     │
-       │  FTS / VSS /      │                │  ad-hoc SQL / JOIN   │
-       │  Hybrid (RRF)     │                │  / 集計               │
-       └───────────────────┘                └─────────────────────┘
+              ┌────────────────────┼───────────────────────┐
+              ▼                    ▼                        ▼
+   ┌──────────────────┐  ┌─────────────────────┐  ┌──────────────────────┐
+   │  Axum + HTMX     │  │  DuckDB on Lance     │  │  Python Agent        │
+   │  Search / Admin  │  │  ad-hoc SQL / JOIN   │  │  PydanticAI + Gemini │
+   │  localhost:3000  │  │  / 集計               │  │  Streamlit UI        │
+   └──────────────────┘  └─────────────────────┘  │  DuckDB 履歴         │
+                                                   │  localhost:8501      │
+                                                   └──────────────────────┘
 ```
 
 ### なぜ Lance か
 - FTS (BM25) と Vector index (IvfPq) を **データセットに同梱**できる
 - `_distance` / `_score` / `_relevance_score` 列がネイティブで返る
 - DuckDB から `INSTALL lance; LOAD lance;` で透過的に SQL クエリ可能
+
+### url_events — work queue としての SQLite
+
+| status | 意味 |
+|--------|------|
+| `pending` | 未処理 (ingest_urls で登録直後) |
+| `processing` | pipeline 実行中 (クラッシュ時はここで停止) |
+| `done` | Lance への取り込み完了 |
+| `failed` | fetch / LLM / Lance write 失敗 (error 列に理由) |
+
+id は URL の FNV-1a hash であり、LanceStore の `content_id` と一致する。
+pipeline 後に `existing_content_ids()` で Lance を参照することで per-URL の成否を判定する。
 
 ### SQLite ⨝ Lance contents (HN namespace)
 HN ルートでは `contents.id == hn_items.id (HN item_id)` で完全一致するので、`LanceReader::open` 時に
@@ -88,8 +102,10 @@ backend/src/
 │   ├── openai.rs     差し替え可
 │   └── prompts.rs    extraction schema
 │
-├── db/               SQLite (HN メタ専用)
-│   └── hn.rs         hn_items CRUD
+├── db/               SQLite アクセス層
+│   ├── hn.rs         hn_items CRUD
+│   ├── events.rs     url_events (work queue): enqueue / claim / mark_done / mark_failed
+│   └── chat.rs       チャット履歴
 │
 ├── lance/
 │   ├── store.rs      LanceStore: 書き込み + index 管理
@@ -139,14 +155,65 @@ URLs ──▶ fetch+parse (buffer_unordered) ──▶ LLM extract (buffer_unor
 
 ---
 
+## 起動方法
+
+### 検索 UI (Rust + HTMX)
+
+```sh
+cd backend
+cargo run --bin serve
+# → http://localhost:3000
+```
+
+> HTMX CDN を使うためネット接続が必要。オフライン運用する場合は CDN を落としてローカルに置く:
+> ```sh
+> curl -o frontend/htmx.min.js https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js
+> # index.html の script src を ./htmx.min.js に変更
+> ```
+
+### Agent チャット (Python + Streamlit)
+
+```sh
+cd agent
+uv sync          # 初回のみ
+streamlit run app.py
+# → http://localhost:8501
+```
+
+DuckDB 履歴ファイルは `~/.wastest/history.duckdb` に自動作成される。
+
+### データパイプライン (URL 取り込み)
+
+```sh
+cd backend
+
+# 1. URL を work queue に登録
+cargo run --bin ingest_urls -- <namespace> <url> [url ...]
+
+# 2. 取り込み実行
+cargo run --bin process_events -- <namespace>
+
+# インデックス再構築 (append 後に必要)
+cargo run --bin refresh_indexes -- <namespace>
+```
+
+---
+
 ## CLI Bins
 
 ```sh
 # HN pipeline (cron で叩く想定 = main.rs)
 cargo run
 
-# 任意 URL を namespace に投入
+# 任意 URL を namespace に登録 (url_events に pending として追記)
 cargo run --bin ingest_urls -- <namespace> <url> [url ...]
+
+# pending URL を処理 (pipeline 実行 → done/failed にマーク)
+cargo run --bin process_events -- <namespace>
+cargo run --bin process_events -- <namespace> --batch 50  # 一度に処理する件数を指定
+
+# 失敗/中断した processing 行を再試行できる状態に戻す
+# sqlite3 wastest.db "UPDATE url_events SET status='pending' WHERE status='processing'"
 
 # smoke (namespace=smoke, 毎回再生成)
 cargo run --bin smoke_pipeline
@@ -175,16 +242,19 @@ cargo run --bin agent
 
 ## Configuration
 
-`.env` (envy で読み込み):
+`backend/.env` (Rust + Python 共通で参照):
 
 ```env
 DATABASE_URL=sqlite://./wastest.db
 LANCE_DIR=./data/lance
-OPENAI_API_KEY=...
 GEMINI_API_KEY=...
+OPENAI_API_KEY=...
 S3_BUCKET_ID=...
 S3_ACCESS_KEY=...
 S3_SECRET_KEY=...
+
+# Python agent のみ (省略時は ~/.wastest/history.duckdb)
+HISTORY_DB=~/.wastest/history.duckdb
 ```
 
 Lance ディレクトリ配置: `{LANCE_DIR}/{namespace}/{contents,statements,code_blocks}.lance/`
